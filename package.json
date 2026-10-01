@@ -1,0 +1,22 @@
+{
+  "name": "youtube-long-to-shots",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-Powered Long Video to Highly Optimized Social Shorts Platform",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "dev:all": "concurrently \"npm run dev --workspace=apps/web\" \"npm run worker --workspace=services/media-worker\"",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

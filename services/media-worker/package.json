@@ -1,0 +1,21 @@
+{
+  "name": "@shorts/media-worker",
+  "version": "1.0.0",
+  "main": "./dist/worker.js",
+  "types": "./dist/worker.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "worker": "node dist/worker.js",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "@shorts/platform-presets": "*",
+    "@shorts/shared": "*",
+    "@shorts/video-config": "*",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3"
+  }
+}

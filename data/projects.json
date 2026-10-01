@@ -1,0 +1,37 @@
+[
+  {
+    "id": "5e5cc1d5-4eff-4562-a90e-a2272457b153",
+    "title": "POCO F3",
+    "status": "PROCESSING",
+    "sourceFilename": "POCO F3.mp4",
+    "storageKey": "1790851249641_POCO_F3.mp4",
+    "sourceMetadata": {
+      "durationSeconds": 596.352,
+      "width": 1280,
+      "height": 720,
+      "displayAspectRatio": "16:9",
+      "frameRate": 60,
+      "videoCodec": "h264",
+      "bitrateKbps": 1742,
+      "audioCodec": "aac",
+      "audioChannels": 2,
+      "audioSampleRate": 44100,
+      "rotation": 0,
+      "isHDR": false,
+      "colorSpace": "bt709",
+      "fileSizeBytes": 129889653
+    },
+    "selectedDurationSeconds": 45,
+    "remainderStrategy": "redistribute",
+    "targetAspectRatio": "9:16",
+    "qualityTier": "2k",
+    "enable60Fps": true,
+    "subtitleThemeId": "neon-glow",
+    "editingIntensity": "extreme",
+    "reframeStrategy": "ai-smart-crop",
+    "enableCaptions": true,
+    "clips": [],
+    "createdAt": "2026-10-01T10:41:43.497Z",
+    "updatedAt": "2026-10-01T10:41:49.560Z"
+  }
+]

@@ -1,0 +1,164 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String?
+  planTier      String    @default("PRO_CREATOR") // FREE, PRO_CREATOR, STUDIO
+  quotaSeconds  Int       @default(3600) // 60 minutes free quota
+  usedSeconds   Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  projects      Project[]
+}
+
+model Project {
+  id                 String          @id @default(uuid())
+  userId             String
+  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title              String
+  sourceDuration     Float           @default(0)
+  selectedDuration   Int             @default(30)
+  remainderStrategy  String          @default("ignore") // ignore, shorter-final, redistribute, controlled-overlap
+  processingMode     String          @default("mode-a-exact") // mode-a-exact, mode-b-highlights
+  targetAspectRatio  String          @default("9:16")
+  qualityTier        String          @default("1080p")
+  enable60Fps        Boolean         @default(true)
+  subtitleThemeId    String          @default("bold-creator")
+  editingIntensity   String          @default("balanced")
+  reframeStrategy    String          @default("ai-smart-crop")
+  status             String          @default("DRAFT") // DRAFT, PROCESSING, READY, FAILED
+  confirmedOwnership Boolean         @default(true)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  sourceVideo        SourceVideo?
+  processingJobs     ProcessingJob[]
+  clips              Clip[]
+}
+
+model SourceVideo {
+  id                 String    @id @default(uuid())
+  projectId          String    @unique
+  project            Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  originalFilename   String
+  storageKey         String
+  durationSeconds    Float
+  width              Int
+  height             Int
+  displayAspectRatio String
+  frameRate          Float
+  videoCodec         String
+  bitrateKbps        Int
+  audioCodec         String?
+  audioChannels      Int?
+  audioSampleRate    Int?
+  rotation           Int?      @default(0)
+  isHDR              Boolean   @default(false)
+  fileSizeBytes      BigInt
+  createdAt          DateTime  @default(now())
+}
+
+model ProcessingJob {
+  id                       String     @id @default(uuid())
+  projectId                String
+  project                  Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status                   String     @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED
+  stage                    String     @default("UPLOADING")
+  progressPercent          Int        @default(0)
+  estimatedRemainingSecs   Int?
+  errorMessage             String?
+  retryCount               Int        @default(0)
+  maxRetries               Int        @default(3)
+  startedAt                DateTime?
+  completedAt              DateTime?
+  createdAt                DateTime   @default(now())
+  updatedAt                DateTime   @updatedAt
+
+  events                   JobEvent[]
+}
+
+model JobEvent {
+  id        String        @id @default(uuid())
+  jobId     String
+  job       ProcessingJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  stage     String
+  message   String
+  percent   Int
+  createdAt DateTime      @default(now())
+}
+
+model Clip {
+  id                   String             @id @default(uuid())
+  projectId            String
+  project              Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  clipIndex            Int
+  startTime            Float
+  endTime              Float
+  duration             Float
+  status               String             @default("READY")
+  mainTopic            String
+  summary              String
+  engagementPotential  Int                @default(85) // 0 to 100
+  engagementRationale  String
+  hookType             String             @default("curiosity")
+  hookText             String
+  subtitleThemeId      String             @default("bold-creator")
+  reframeStrategy      String             @default("ai-smart-crop")
+  cropCenterX          Float              @default(50.0)
+  cleanFilename        String
+  detailedFilename     String
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  renders              Render[]
+  platformMetadata     PlatformMetadata[]
+  transcriptWords      TranscriptWord[]
+}
+
+model TranscriptWord {
+  id        String   @id @default(uuid())
+  clipId    String
+  clip      Clip     @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  word      String
+  startTime Float
+  endTime   Float
+  speaker   String?  @default("Speaker 1")
+}
+
+model Render {
+  id             String   @id @default(uuid())
+  clipId         String
+  clip           Clip     @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  resolutionTier String   // 1080p, 2k, 4k
+  targetFps      Int      @default(60)
+  storagePath    String
+  downloadUrl    String
+  fileSizeBytes  BigInt   @default(0)
+  width          Int
+  height         Int
+  isValidated    Boolean  @default(false)
+  createdAt      DateTime @default(now())
+}
+
+model PlatformMetadata {
+  id                      String   @id @default(uuid())
+  clipId                  String
+  clip                    Clip     @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  platform                String   // youtube-shorts, tiktok, instagram-reels, x, threads, universal
+  title                   String
+  caption                 String
+  description             String
+  hashtagsJson            String   // serialized JSON array
+  cta                     String
+  thumbnailText           String
+  suggestedCoverTimestamp Float    @default(0.5)
+}
