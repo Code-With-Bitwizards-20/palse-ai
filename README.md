@@ -100,6 +100,19 @@ npm run dev
 
 ---
 
+## 🌐 Deploy on Netlify (Recommended)
+
+Thanks to `netlify.toml`, deploying on Netlify is zero-config:
+
+1. Import your repository into [Netlify](https://app.netlify.com/).
+2. Netlify will auto-detect settings from [netlify.toml](file:///c:/Users/ACCER/Desktop/github%20respos/palse-ai/netlify.toml):
+   - **Base directory**: *(leave empty / root)*
+   - **Build command**: `npm run build`
+   - **Publish directory**: `apps/web/out`
+3. Click **Deploy Site**.
+
+---
+
 ## 🌐 Deploy on Vercel
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Code-With-Bitwizards-20/pulsecut-local-ai)
