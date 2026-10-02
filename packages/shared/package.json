@@ -9,6 +9,7 @@
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
+    "@shorts/platform-presets": "*",
     "zod": "^3.24.2"
   },
   "devDependencies": {
