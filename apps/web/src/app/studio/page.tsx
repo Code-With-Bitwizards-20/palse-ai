@@ -217,9 +217,10 @@ export default function StudioPage() {
     let animId: number;
 
     const renderLoop = () => {
+      const isExporting = shorts.some((s) => s.status === 'rendering');
       const video = videoRef.current;
       const canvas = previewCanvasRef.current;
-      if (video && canvas && video.readyState >= 2) {
+      if (!isExporting && video && canvas && video.readyState >= 2) {
         const ctx = canvas.getContext('2d');
         if (ctx) {
           const activeShort = shorts[activeShortIndex];
@@ -354,6 +355,15 @@ export default function StudioPage() {
 
     try {
       const theme = SUBTITLE_THEMES[subtitleThemeId];
+      const devicePerf = (() => {
+        switch (deviceCaps?.performanceLevel) {
+          case 'Excellent': return 'excellent' as const;
+          case 'Good':      return 'good' as const;
+          case 'Limited':   return 'limited' as const;
+          default:          return 'compat' as const;
+        }
+      })();
+
       const result: RenderResult = await renderShortToMp4({
         sourceVideo: videoRef.current,
         sourceFile: videoFile || undefined,
@@ -369,6 +379,7 @@ export default function StudioPage() {
         subtitleTheme: theme,
         hook: short.hook,
         fileHandle,
+        devicePerf,
         onProgress: (pct, stage) => {
           setShorts((prev) =>
             prev.map((s, idx) =>

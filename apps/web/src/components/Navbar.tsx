@@ -41,14 +41,15 @@ export function Navbar() {
   }, [pathname]);
 
   // Prevent body scroll when sidebar is open
+  // Use classList instead of style.overflow mutation to avoid forced reflow
   useEffect(() => {
     if (sidebarOpen) {
-      document.body.style.overflow = 'hidden';
+      document.body.classList.add('no-scroll');
     } else {
-      document.body.style.overflow = '';
+      document.body.classList.remove('no-scroll');
     }
     return () => {
-      document.body.style.overflow = '';
+      document.body.classList.remove('no-scroll');
     };
   }, [sidebarOpen]);
 
@@ -190,7 +191,7 @@ export function Navbar() {
                   </span>
                   {label}
                 </span>
-                <ChevronRight className={`h-4 w-4 transition-transform ${active ? 'text-indigo-400' : 'text-slate-600 group-hover:text-slate-400 group-hover:translate-x-0.5'}`} />
+                <ChevronRight className={`h-4 w-4 transition-transform ${active ? 'text-indigo-400' : 'text-slate-400 group-hover:text-slate-300 group-hover:translate-x-0.5'}`} />
               </Link>
             );
           })}
@@ -206,7 +207,7 @@ export function Navbar() {
             <Sparkles className="h-4 w-4" />
             <span>Launch Studio — It&apos;s Free</span>
           </Link>
-          <p className="text-center text-[11px] text-slate-500">
+          <p className="text-center text-[11px] text-slate-400">
             No signup · No upload · 100% private
           </p>
         </div>

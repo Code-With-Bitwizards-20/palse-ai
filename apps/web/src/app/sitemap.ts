@@ -4,7 +4,7 @@ import { PLATFORM_PRESETS } from '@shorts/platform-presets';
 export const dynamic = 'force-static';
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const baseUrl = 'https://pulsecut-ai.vercel.app';
+  const baseUrl = 'https://palse-ai-by-code-with-bitwizards.vercel.app';
 
   const staticPages = [
     '',

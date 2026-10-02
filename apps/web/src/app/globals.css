@@ -19,10 +19,12 @@ body {
   padding: 0;
   background-color: var(--background);
   color: var(--foreground);
-  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Use the CSS variable injected by next/font/google — zero network round-trip */
+  font-family: var(--font-inter), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   overflow-x: hidden;
   min-width: 315px; /* WCAG 315px responsive requirement */
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* Custom sleek dark scrollbar */
@@ -67,4 +69,36 @@ body {
 /* Range input slider customized */
 input[type="range"] {
   accent-color: #6366F1;
+}
+
+/*
+ * content-visibility: auto — allows the browser to skip rendering
+ * off-screen sections entirely until they approach the viewport.
+ * This is the single biggest paint-speed win for below-the-fold content.
+ */
+.cv-auto {
+  content-visibility: auto;
+  /* contain-intrinsic-size: prevents layout shift when the browser
+     skips paint; value approximates the section's typical height. */
+  contain-intrinsic-size: 0 400px;
+}
+
+/*
+ * Promote animated/hover elements to their own compositor layer
+ * so GPU handles transforms without triggering a main-thread reflow.
+ */
+.will-change-transform {
+  will-change: transform;
+}
+
+/* Prevent Cumulative Layout Shift from sidebar transitions */
+aside[aria-label="Mobile navigation"] {
+  /* The sidebar slides off-screen; promoting to layer avoids CLS */
+  will-change: transform;
+  transform: translateZ(0);
+}
+
+/* Body scroll-lock class toggled by Navbar — avoids style mutation reflow */
+body.no-scroll {
+  overflow: hidden;
 }

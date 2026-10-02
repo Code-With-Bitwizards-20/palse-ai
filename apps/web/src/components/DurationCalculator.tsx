@@ -37,7 +37,7 @@ export function DurationCalculator({
             <Clock className="h-4 w-4 text-brand-400" />
             <span>Short Duration Control</span>
           </h3>
-          <p className="text-xs text-gray-400 mt-0.5">
+          <p className="text-xs text-slate-300 mt-0.5">
             Select target length per Short. Math updates live with zero footage drift.
           </p>
         </div>
@@ -72,7 +72,7 @@ export function DurationCalculator({
 
       {/* Duration Slider */}
       <div className="space-y-2 pt-1">
-        <div className="flex justify-between text-xs text-gray-400">
+        <div className="flex justify-between text-xs text-slate-300">
           <span>10 seconds (Micro-hook)</span>
           <span className="font-semibold text-brand-400">{selectedDuration}s</span>
           <span>180 seconds (3 min deep dive)</span>
@@ -91,37 +91,37 @@ export function DurationCalculator({
 
       {/* Live Calculation Display (Section 5 requirements) */}
       <div className="rounded-xl border border-gray-800/80 bg-surface-200/80 p-4">
-        <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-3 flex items-center gap-1.5">
+        <div className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-3 flex items-center gap-1.5">
           <Scissors className="h-3.5 w-3.5 text-accent-cyan" />
           <span>Live Calculation Breakdown</span>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 text-center">
           <div className="rounded-lg bg-surface-100 p-2.5 border border-gray-800">
-            <span className="block text-[11px] text-gray-400">Source</span>
+            <span className="block text-[11px] text-slate-300">Source</span>
             <span className="text-sm font-bold text-white font-mono mt-0.5 block">
               {formatDuration(sourceDurationSeconds)}
             </span>
           </div>
 
           <div className="rounded-lg bg-surface-100 p-2.5 border border-gray-800">
-            <span className="block text-[11px] text-gray-400">Selected</span>
+            <span className="block text-[11px] text-slate-300">Selected</span>
             <span className="text-sm font-bold text-brand-400 font-mono mt-0.5 block">
               {formatDuration(selectedDuration)}
             </span>
           </div>
 
           <div className="rounded-lg bg-surface-100 p-2.5 border border-gray-800">
-            <span className="block text-[11px] text-gray-400">Full Shorts</span>
+            <span className="block text-[11px] text-slate-300">Full Shorts</span>
             <span className="text-sm font-bold text-emerald-400 font-mono mt-0.5 block">
               {calculation.fullClipCount}
             </span>
           </div>
 
           <div className="rounded-lg bg-surface-100 p-2.5 border border-gray-800">
-            <span className="block text-[11px] text-gray-400">Remaining</span>
+            <span className="block text-[11px] text-slate-300">Remaining</span>
             <span
               className={`text-sm font-bold font-mono mt-0.5 block ${
-                hasRemainder ? 'text-amber-400' : 'text-gray-400'
+                hasRemainder ? 'text-amber-400' : 'text-slate-300'
               }`}
             >
               {formatDuration(calculation.remainder)}
@@ -152,7 +152,7 @@ export function DurationCalculator({
               className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
                 remainderStrategy === 'ignore'
                   ? 'border-brand-500 bg-brand-500/10 text-white'
-                  : 'border-gray-800 bg-surface-100 text-gray-400 hover:text-white'
+                  : 'border-gray-800 bg-surface-100 text-slate-300 hover:text-white'
               }`}
             >
               <input
@@ -165,7 +165,7 @@ export function DurationCalculator({
               />
               <div>
                 <span className="font-semibold block text-gray-200">1. Ignore remainder</span>
-                <span className="text-[11px] text-gray-400 block mt-0.5">
+                <span className="text-[11px] text-slate-300 block mt-0.5">
                   Discard last {calculation.remainder}s to keep only exact {selectedDuration}s clips.
                 </span>
               </div>
@@ -175,7 +175,7 @@ export function DurationCalculator({
               className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
                 remainderStrategy === 'shorter-final'
                   ? 'border-brand-500 bg-brand-500/10 text-white'
-                  : 'border-gray-800 bg-surface-100 text-gray-400 hover:text-white'
+                  : 'border-gray-800 bg-surface-100 text-slate-300 hover:text-white'
               }`}
             >
               <input
@@ -190,7 +190,7 @@ export function DurationCalculator({
                 <span className="font-semibold block text-gray-200">
                   2. Generate one shorter final clip
                 </span>
-                <span className="text-[11px] text-gray-400 block mt-0.5">
+                <span className="text-[11px] text-slate-300 block mt-0.5">
                   Produce full clips + 1 final Short lasting {calculation.remainder}s.
                 </span>
               </div>
@@ -200,7 +200,7 @@ export function DurationCalculator({
               className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
                 remainderStrategy === 'redistribute'
                   ? 'border-brand-500 bg-brand-500/10 text-white'
-                  : 'border-gray-800 bg-surface-100 text-gray-400 hover:text-white'
+                  : 'border-gray-800 bg-surface-100 text-slate-300 hover:text-white'
               }`}
             >
               <input
@@ -215,7 +215,7 @@ export function DurationCalculator({
                 <span className="font-semibold block text-gray-200">
                   3. Smartly redistribute boundaries
                 </span>
-                <span className="text-[11px] text-gray-400 block mt-0.5">
+                <span className="text-[11px] text-slate-300 block mt-0.5">
                   Evenly expand/contract boundaries to absorb remainder without loss.
                 </span>
               </div>
@@ -225,7 +225,7 @@ export function DurationCalculator({
               className={`flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors ${
                 remainderStrategy === 'controlled-overlap'
                   ? 'border-brand-500 bg-brand-500/10 text-white'
-                  : 'border-gray-800 bg-surface-100 text-gray-400 hover:text-white'
+                  : 'border-gray-800 bg-surface-100 text-slate-300 hover:text-white'
               }`}
             >
               <input
@@ -240,14 +240,14 @@ export function DurationCalculator({
                 <span className="font-semibold block text-gray-200">
                   4. Controlled overlap clip
                 </span>
-                <span className="text-[11px] text-gray-400 block mt-0.5">
+                <span className="text-[11px] text-slate-300 block mt-0.5">
                   Add 1 extra full-length clip anchored to video end (clearly tagged).
                 </span>
               </div>
             </label>
           </div>
 
-          <div className="flex items-center gap-1.5 text-[11px] text-gray-400 pt-1">
+          <div className="flex items-center gap-1.5 text-[11px] text-slate-300 pt-1">
             <Info className="h-3.5 w-3.5 text-brand-400 shrink-0" />
             <span>
               ShortsEngine never silently duplicates footage. Boundaries are mathematically exact.

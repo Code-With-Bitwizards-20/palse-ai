@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+
+Sitemap: https://palse-ai-by-code-with-bitwizards.vercel.app/sitemap.xml

@@ -9,7 +9,7 @@ export const APP_CONFIG = {
   tagline: 'Private Long Video to Shorts Studio',
   description:
     '100% in-browser, privacy-first AI video clipping studio. Converts long videos into 60 FPS platform-ready Shorts with zero server uploads and zero API keys.',
-  url: 'https://pulsecut-ai.vercel.app',
+  url: 'https://palse-ai-by-code-with-bitwizards.vercel.app',
   ogImage: '/brand/og-image.png',
   version: '2.0.0',
   author: 'PulseCut Engineering',

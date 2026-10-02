@@ -1,32 +1,41 @@
-'use client';
-
-import React, { useState } from 'react';
+import React, { Suspense } from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
-import { DurationCalculator } from '@/components/DurationCalculator';
+import { CalculatorSection } from '@/components/CalculatorSection';
 import { PLATFORM_PRESETS } from '@shorts/platform-presets';
-import type { RemainderStrategy } from '@shorts/shared';
 import {
   Sparkles,
   ArrowRight,
-  Video,
-  Play,
   CheckCircle2,
-  Sliders,
-  Layers,
-  Zap,
   ShieldCheck,
   Eye,
-  Type,
-  Maximize2,
   Lock,
-  Cpu,
-  Tv,
 } from 'lucide-react';
 
-export default function HomePage() {
-  const [demoDuration, setDemoDuration] = useState(30);
-  const [demoStrategy, setDemoStrategy] = useState<RemainderStrategy>('ignore');
+export const metadata: Metadata = {
+  title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+  description:
+    '100% in-browser, privacy-first AI video clipping studio. Converts long videos into 60 FPS platform-ready Shorts with zero server uploads and zero API keys.',
+  alternates: {
+    canonical: 'https://palse-ai-by-code-with-bitwizards.vercel.app',
+  },
+  openGraph: {
+    title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+    description:
+      'Turn long videos into scroll-stopping 60 FPS Shorts directly in your browser. 100% local processing, zero cloud uploads.',
+    url: 'https://palse-ai-by-code-with-bitwizards.vercel.app',
+    siteName: 'PulseCut Local AI',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+    description:
+      'Turn long videos into scroll-stopping 60 FPS Shorts directly in your browser. 100% local processing, zero cloud uploads.',
+  },
+};
 
+export default function HomePage() {
   return (
     <div className="space-y-24 pb-20">
       {/* 1. HERO SECTION */}
@@ -56,7 +65,7 @@ export default function HomePage() {
             </span>
           </h1>
 
-          <p className="mx-auto max-w-2xl text-base sm:text-lg text-slate-300 leading-relaxed font-normal">
+          <p className="mx-auto max-w-2xl text-base sm:text-lg text-slate-200 leading-relaxed font-normal">
             AI-assisted clipping, captions, reframing and editing directly in your browser. No uploads. No API keys.
           </p>
 
@@ -73,15 +82,15 @@ export default function HomePage() {
 
             <a
               href="#how-it-works"
-              className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/80 px-7 py-4 text-sm font-semibold text-slate-300 hover:bg-slate-800 hover:text-white transition-all backdrop-blur-sm"
+              className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/80 px-7 py-4 text-sm font-semibold text-slate-200 hover:bg-slate-800 hover:text-white transition-all backdrop-blur-sm"
             >
-              <Eye className="h-4 w-4 text-slate-400" />
+              <Eye className="h-4 w-4 text-slate-300" />
               <span>See How It Works</span>
             </a>
           </div>
 
           {/* Privacy Guarantee Pill */}
-          <div className="pt-4 flex items-center justify-center gap-6 text-xs text-slate-400">
+          <div className="pt-4 flex items-center justify-center gap-6 text-xs text-slate-300">
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
               WebCodecs 60 FPS Engine
@@ -98,52 +107,17 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* 2. DURATION CALCULATOR DEMO SECTION */}
-      <section className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
-        <div className="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 sm:p-10 backdrop-blur-md shadow-2xl">
-          <div className="text-center max-w-xl mx-auto mb-8 space-y-2">
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-brand-500/10 border border-brand-500/20 px-3 py-1 text-xs font-semibold text-brand-300">
-              <Sliders className="h-3.5 w-3.5 text-brand-400" />
-              <span>Exact Mathematical Split Engine</span>
-            </div>
-            <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-              Test Exact Clip Timeline Math
-            </h2>
-            <p className="text-sm text-slate-400">
-              Slide target duration to see how a sample 5-minute (300-second) video splits mathematically into exact Shorts.
-            </p>
-          </div>
+      {/* 2. DURATION CALCULATOR DEMO SECTION — lazy loaded client component */}
+      <CalculatorSection />
 
-          <DurationCalculator
-            sourceDurationSeconds={300}
-            selectedDuration={demoDuration}
-            onDurationChange={(d) => setDemoDuration(d)}
-            remainderStrategy={demoStrategy}
-            onStrategyChange={(s) => setDemoStrategy(s)}
-          />
-
-          <div className="mt-8 pt-6 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="text-xs text-slate-400">
-              Formula: <code className="text-brand-300 font-mono">fullClips = floor(300 / {demoDuration})</code>
-            </div>
-            <Link
-              href="/studio"
-              className="text-xs font-bold text-brand-400 hover:text-brand-300 flex items-center gap-1"
-            >
-              Open Studio with Your Video <ArrowRight className="h-3.5 w-3.5" />
-            </Link>
-          </div>
-        </div>
-      </section>
-
-      {/* 3. HOW IT WORKS SECTION */}
-      <section id="how-it-works" className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 space-y-12">
+      {/* 3. HOW IT WORKS SECTION — below-fold, use content-visibility for paint skip */}
+      <section id="how-it-works" className="cv-auto mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 space-y-12">
         <div className="text-center space-y-3">
           <span className="text-xs font-bold uppercase tracking-wider text-brand-400">Browser Pipeline</span>
           <h2 className="text-3xl sm:text-4xl font-black text-white tracking-tight">
             How Client-Side Video AI Works
           </h2>
-          <p className="text-slate-400 max-w-2xl mx-auto text-sm sm:text-base">
+          <p className="text-slate-300 max-w-2xl mx-auto text-sm sm:text-base">
             No servers, no queues, no privacy risks. Every step executes inside your browser tab.
           </p>
         </div>
@@ -154,7 +128,7 @@ export default function HomePage() {
               1
             </div>
             <h3 className="text-lg font-bold text-white">Select Local File</h3>
-            <p className="text-xs text-slate-400 leading-relaxed">
+            <p className="text-xs text-slate-300 leading-relaxed">
               Read metadata locally via HTML5 File API and Mediabunny. Your video is never sent over any network.
             </p>
           </div>
@@ -164,7 +138,7 @@ export default function HomePage() {
               2
             </div>
             <h3 className="text-lg font-bold text-white">Smart 9:16 Reframe</h3>
-            <p className="text-xs text-slate-400 leading-relaxed">
+            <p className="text-xs text-slate-300 leading-relaxed">
               Horizontal video is intelligently reframed using face tracking, AI Smart Pan, or cinematic Fit+Blur background.
             </p>
           </div>
@@ -173,8 +147,8 @@ export default function HomePage() {
             <div className="h-10 w-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 font-bold">
               3
             </div>
-            <h3 className="text-lg font-bold text-white">Kinetic Subtitles & Hooks</h3>
-            <p className="text-xs text-slate-400 leading-relaxed">
+            <h3 className="text-lg font-bold text-white">Kinetic Subtitles &amp; Hooks</h3>
+            <p className="text-xs text-slate-300 leading-relaxed">
               Generate opening hook headlines and animated word-highlight captions inside platform-safe zones.
             </p>
           </div>
@@ -184,19 +158,19 @@ export default function HomePage() {
               4
             </div>
             <h3 className="text-lg font-bold text-white">60 FPS Hardware Render</h3>
-            <p className="text-xs text-slate-400 leading-relaxed">
+            <p className="text-xs text-slate-300 leading-relaxed">
               GPU-accelerated WebCodecs encode frames directly to MP4 and stream output directly to your disk.
             </p>
           </div>
         </div>
       </section>
 
-      {/* 4. PLATFORMS SUPPORTED */}
-      <section className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 space-y-8">
+      {/* 4. PLATFORMS SUPPORTED — below-fold */}
+      <section className="cv-auto mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 space-y-8">
         <div className="text-center space-y-2">
           <h2 className="text-2xl sm:text-3xl font-bold text-white">Target Every Major Platform</h2>
-          <p className="text-slate-400 text-sm">
-            Calibrated safe zones and metadata character limits for {new Date().getFullYear()} platform specifications.
+          <p className="text-slate-300 text-sm">
+            Calibrated safe zones and metadata character limits for 2026 platform specifications.
           </p>
         </div>
 
@@ -208,14 +182,14 @@ export default function HomePage() {
             >
               <div className="text-sm font-bold text-white truncate">{p.name.split(' ')[0]}</div>
               <div className="text-[11px] text-brand-300 font-mono mt-1">9:16 • 60 FPS</div>
-              <div className="text-[10px] text-slate-500 mt-1">Safe-Zone Cert.</div>
+              <div className="text-[11px] text-slate-300 mt-1">Safe-Zone Cert.</div>
             </div>
           ))}
         </div>
       </section>
 
-      {/* 5. PRIVACY CALLOUT BANNER */}
-      <section className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      {/* 5. PRIVACY CALLOUT BANNER — below-fold */}
+      <section className="cv-auto mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="rounded-3xl border border-emerald-500/20 bg-gradient-to-r from-emerald-950/40 to-slate-900/80 p-8 sm:p-12 text-center space-y-4">
           <div className="h-12 w-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 mx-auto">
             <ShieldCheck className="h-6 w-6" />
@@ -223,7 +197,7 @@ export default function HomePage() {
           <h2 className="text-2xl sm:text-3xl font-extrabold text-white">
             Your Videos Never Touch Our Servers
           </h2>
-          <p className="text-slate-300 max-w-2xl mx-auto text-sm sm:text-base leading-relaxed">
+          <p className="text-slate-200 max-w-2xl mx-auto text-sm sm:text-base leading-relaxed">
             Unlike other video editors, Local AI Shorts Studio runs entirely in your browser using modern WebCodecs and local AI. No cloud storage, no account registration, no telemetry on your media.
           </p>
           <div className="pt-2">

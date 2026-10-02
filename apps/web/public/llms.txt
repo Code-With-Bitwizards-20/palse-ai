@@ -1,0 +1,23 @@
+# PulseCut Local AI — In-Browser Video to Shorts Studio
+
+> PulseCut Local AI is a 100% in-browser, privacy-first AI video clipping and editing studio. It converts long horizontal videos into 60 FPS platform-ready vertical Shorts, TikToks, and Reels with zero cloud processing, zero server uploads, and zero API keys required.
+
+## Core Capabilities
+- **Local AI Clipping**: Split and reframe videos entirely on the client device using browser-native technologies.
+- **Hardware WebCodecs**: Real-time 60 FPS hardware-accelerated video rendering via GPU encoders (H.264/AVC).
+- **Kinetic Subtitles**: Word-level highlight captions with custom themes calibrated within platform safe zones.
+- **AI Smart Reframing**: Intelligent face focus, speaker tracking, and cinematic 9:16 aspect ratio transforms.
+- **Platform Presets**: Calibrated dimensions, bitrates, and safe-zones for YouTube Shorts, TikTok, Instagram Reels, X Clips, Threads, and LinkedIn Video.
+
+## Key Studio Pages & Architecture
+- [Studio](/studio): The full in-browser timeline editor, live preview canvas, and WebCodecs export engine.
+- [Features](/features): Deep technical breakdown of client-side video processing, privacy architecture, and supported codecs.
+- [Video to Shorts](/video-to-shorts): Quick conversion guide and workflow for repurposing long-form content.
+- [Smart Reframe](/smart-reframe): AI face and motion-tracking reframing details.
+- [Platforms](/platforms): Platform specifications, aspect ratios, and safe-zone rules.
+- [Privacy Manifesto](/privacy): Complete zero-upload, zero-retention privacy documentation.
+
+## Privacy & Security Guarantees
+- Videos are processed locally using WebCodecs and Web Audio API.
+- No user footage, audio, or metadata ever leaves the browser tab.
+- Operates offline or in air-gapped environments once loaded.

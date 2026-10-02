@@ -1,10 +1,24 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
+import { Inter } from 'next/font/google';
 import './globals.css';
 import { Navbar } from '@/components/Navbar';
 import { Footer } from '@/components/Footer';
 import { APP_CONFIG } from '@/config/app';
 
+// next/font/google loads Inter with zero render-blocking:
+// the font CSS is inlined at build time and the font files are
+// self-hosted by Vercel — no external round-trip on first paint.
+const inter = Inter({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-inter',
+  preload: true,
+  // Only load the weights actually used in the UI
+  weight: ['400', '500', '600', '700', '800', '900'],
+});
+
 export const metadata: Metadata = {
+  metadataBase: new URL(APP_CONFIG.url || 'https://palse-ai-by-code-with-bitwizards.vercel.app'),
   title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
   description:
     '100% in-browser, privacy-first AI video clipping studio. Converts long videos into 60 FPS platform-ready Shorts with zero server uploads and zero API keys.',
@@ -53,7 +67,7 @@ export const metadata: Metadata = {
   },
 };
 
-export const viewport = {
+export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   maximumScale: 5,
@@ -87,16 +101,20 @@ export default function RootLayout({
   };
 
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className={`dark ${inter.variable}`}>
       <head>
-        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-        <link rel="manifest" href="/manifest.webmanifest" />
+        {/* Structured data */}
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
+        {/* Favicon */}
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+        {/* PWA manifest */}
+        <link rel="manifest" href="/manifest.webmanifest" />
+        {/* Canonical is set per-page via next metadata */}
       </head>
-      <body className="min-h-screen flex flex-col bg-slate-950 text-slate-100 antialiased selection:bg-brand-500 selection:text-white">
+      <body className="min-h-screen flex flex-col bg-slate-950 text-slate-100 antialiased selection:bg-brand-500 selection:text-white font-sans">
         <Navbar />
         <main className="flex-1 w-full">{children}</main>
         <Footer />

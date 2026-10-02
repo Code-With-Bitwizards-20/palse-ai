@@ -180,7 +180,7 @@ export function Footer() {
                 </span>
               </span>
             </Link>
-            <p className="text-xs text-slate-400 leading-relaxed">
+            <p className="text-xs text-slate-300 leading-relaxed">
               Turn one long video into viral, scroll-stopping Shorts in seconds. 100%
               in-browser AI processing — zero cloud uploads, zero subscriptions, complete
               data privacy.
@@ -216,9 +216,9 @@ export function Footer() {
 
           {/* Product links */}
           <div className="space-y-3">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-200">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-200">
               Product &amp; Features
-            </h4>
+            </h3>
             <ul className="space-y-2 text-xs">
               {[
                 { href: '/studio', label: 'Studio Editor' },
@@ -239,9 +239,9 @@ export function Footer() {
 
           {/* Supported Platforms */}
           <div className="space-y-3">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-200">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-200">
               Supported Platforms
-            </h4>
+            </h3>
             <ul className="space-y-2 text-xs">
               {[
                 { href: '/platforms/youtube-shorts', label: 'YouTube Shorts (9:16)' },
@@ -262,9 +262,9 @@ export function Footer() {
 
           {/* Developer & Hire Section */}
           <div className="space-y-3">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-200">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-200">
               Developer &amp; Hire
-            </h4>
+            </h3>
             <ul className="space-y-2 text-xs">
               <li>
                 <a
@@ -374,12 +374,12 @@ export function Footer() {
 
         {/* Bottom Bar: Copyright & Attribution */}
         <div className="border-t border-slate-800/80 pt-6 flex flex-col items-center gap-4 text-center sm:flex-row sm:justify-between sm:text-left">
-          <p className="text-[11px] text-slate-500">
+          <p className="text-[11px] text-slate-400">
             © {currentYear} PulseCut Local AI. All rights reserved. 100% Private, Client-Side Studio.
           </p>
 
           {/* Designed & Developed attribution with clickable portfolio link */}
-          <div className="flex items-center gap-1.5 text-xs text-slate-400">
+          <div className="flex items-center gap-1.5 text-xs text-slate-300">
             <Code2 className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
             <span>Designed &amp; Developed by</span>
             <a
@@ -393,14 +393,14 @@ export function Footer() {
             </a>
           </div>
 
-          <div className="flex items-center gap-4 text-[11px] text-slate-500">
-            <Link href="/privacy" className="hover:text-slate-300 transition-colors">
+          <div className="flex items-center gap-4 text-[11px] text-slate-400">
+            <Link href="/privacy" className="hover:text-slate-200 transition-colors">
               Privacy
             </Link>
-            <Link href="/terms" className="hover:text-slate-300 transition-colors">
+            <Link href="/terms" className="hover:text-slate-200 transition-colors">
               Terms
             </Link>
-            <Link href="/contact" className="hover:text-slate-300 transition-colors">
+            <Link href="/contact" className="hover:text-slate-200 transition-colors">
               Contact
             </Link>
           </div>

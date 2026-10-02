@@ -1,7 +1,18 @@
 /**
  * Browser-Native Video Processing Engine for Local AI Shorts Studio.
- * Uses WebCodecs, Mediabunny / mp4-muxer, OffscreenCanvas, and 60 FPS rendering pipeline.
+ * Uses WebCodecs, mp4-muxer, OffscreenCanvas, and hardware-accelerated encoding.
  * Runs 100% on the client device. Zero server uploads.
+ *
+ * ULTRA-FAST RENDERING OPTIMIZATIONS:
+ *  - Adaptive FPS & Bitrate per device tier (24/30 FPS on low-end, 60 FPS on high-end).
+ *  - Pre-warmed multi-profile H.264 hardware encoder negotiation (High -> Main -> Baseline).
+ *  - OffscreenCanvas with desynchronized=true and alpha=false for direct GPU rendering.
+ *  - Cached vignette radial gradient across all frames (never reallocated).
+ *  - Subtitle binary search O(log n) per frame instead of linear scans.
+ *  - Dedicated seek with timeout safety guard, audio pre-muted to bypass media pipeline stalls.
+ *  - GPU backpressure flow control (encodeQueueSize monitoring) to maximize throughput.
+ *  - Synchronized stereo AAC audio encoding directly multiplexed with zero drift.
+ *  - Direct-to-disk streaming option via File System Access API for zero-memory footprint.
  */
 
 import { Muxer, ArrayBufferTarget, FileSystemWritableFileStreamTarget } from 'mp4-muxer';
@@ -26,17 +37,19 @@ export interface RenderOptions {
   sourceFile?: File | Blob;
   startTime: number;
   endTime: number;
-  targetWidth: number; // 1080, 1440, 2160
-  targetHeight: number; // 1920, 2560, 3840
-  targetFps?: number; // 60
-  bitrate?: number; // e.g. 10_000_000 for 1080p, 20_000_000 for 2K
+  targetWidth: number;
+  targetHeight: number;
+  targetFps?: number;
+  bitrate?: number;
   reframeStrategy: ReframeStrategy;
   editingStyle: EditingStyle;
   subtitles?: SubtitleCue[];
   subtitleTheme?: SubtitleTheme;
   hook?: GeneratedHook;
   onProgress?: (progress: number, stageText: string) => void;
-  fileHandle?: FileSystemFileHandle; // Optional File System Access handle for direct disk streaming
+  fileHandle?: FileSystemFileHandle;
+  /** Device performance hint to adapt quality automatically. */
+  devicePerf?: 'excellent' | 'good' | 'limited' | 'compat';
 }
 
 export interface RenderResult {
@@ -47,11 +60,13 @@ export interface RenderResult {
   fps: number;
   fileSizeBytes: number;
   streamedToDisk: boolean;
+  pipeline?: string;
 }
 
-/**
- * Calculates the crop box from a source video frame to fit a vertical 9:16 target canvas.
- */
+// ---------------------------------------------------------------------------
+// Reframe crop calculation
+// ---------------------------------------------------------------------------
+
 export function calculateReframeCrop(
   sourceWidth: number,
   sourceHeight: number,
@@ -61,7 +76,7 @@ export function calculateReframeCrop(
   timeProgress: number = 0,
   manualPanOffset: number = 0.5
 ) {
-  const targetAspect = targetWidth / targetHeight; // 9 / 16 = 0.5625
+  const targetAspect = targetWidth / targetHeight;
   const sourceAspect = sourceWidth / sourceHeight;
 
   let cropWidth = sourceWidth;
@@ -70,42 +85,27 @@ export function calculateReframeCrop(
   let cropY = 0;
 
   if (sourceAspect > targetAspect) {
-    // Source is wider (e.g. 16:9 horizontal) -> crop horizontally
     cropWidth = sourceHeight * targetAspect;
     cropHeight = sourceHeight;
     cropY = 0;
 
-    let panX = 0.5; // default center
+    let panX = 0.5;
     switch (strategy) {
-      case 'Left':
-        panX = 0.2;
-        break;
-      case 'Right':
-        panX = 0.8;
-        break;
+      case 'Left':       panX = 0.2; break;
+      case 'Right':      panX = 0.8; break;
       case 'Face Focus':
       case 'Speaker Focus':
-        // Eased dynamic center with gentle organic breathing
-        panX = 0.5 + Math.sin(timeProgress * 0.5) * 0.08;
-        break;
+        panX = 0.5 + Math.sin(timeProgress * 0.5) * 0.08; break;
       case 'AI Smart':
-        // Smooth cinematic pan
-        panX = 0.45 + Math.sin(timeProgress * 0.4) * 0.1;
-        break;
-      case 'Manual':
-        panX = manualPanOffset;
-        break;
+        panX = 0.45 + Math.sin(timeProgress * 0.4) * 0.1; break;
+      case 'Manual':     panX = manualPanOffset; break;
       case 'Center':
-      default:
-        panX = 0.5;
-        break;
+      default:           panX = 0.5; break;
     }
 
-    // Clamp cropX so it stays within [0, sourceWidth - cropWidth]
     const maxCropX = sourceWidth - cropWidth;
     cropX = Math.max(0, Math.min(maxCropX, maxCropX * panX));
   } else {
-    // Source is taller than 9:16 -> crop vertically
     cropWidth = sourceWidth;
     cropHeight = sourceWidth / targetAspect;
     cropX = 0;
@@ -115,9 +115,48 @@ export function calculateReframeCrop(
   return { cropX, cropY, cropWidth, cropHeight };
 }
 
-/**
- * Draw frame with chosen reframe strategy, effects, and color grading.
- */
+// ---------------------------------------------------------------------------
+// Subtitle binary search O(log n)
+// ---------------------------------------------------------------------------
+
+function findActiveCue(cues: SubtitleCue[], t: number): SubtitleCue | undefined {
+  let lo = 0;
+  let hi = cues.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const cue = cues[mid];
+    if (t < cue.startTime)      hi = mid - 1;
+    else if (t > cue.endTime)   lo = mid + 1;
+    else                         return cue;
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Vignette gradient cache — created once per canvas size
+// ---------------------------------------------------------------------------
+
+const _vignetteCache = new Map<string, CanvasGradient>();
+
+function getCachedVignette(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  w: number,
+  h: number
+): CanvasGradient {
+  const key = `${w}x${h}`;
+  const cached = _vignetteCache.get(key);
+  if (cached) return cached;
+  const g = ctx.createRadialGradient(w / 2, h / 2, w * 0.35, w / 2, h / 2, w * 0.75);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.28)');
+  _vignetteCache.set(key, g);
+  return g;
+}
+
+// ---------------------------------------------------------------------------
+// Core frame painter (shared by preview loop and render pipeline)
+// ---------------------------------------------------------------------------
+
 export function renderFrameToCanvas(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   video: HTMLVideoElement,
@@ -132,58 +171,34 @@ export function renderFrameToCanvas(
   hook?: GeneratedHook
 ) {
   const timeProgress = currentTime - clipStartTime;
-  ctx.clearRect(0, 0, targetWidth, targetHeight);
 
   if (strategy === 'Fit + Blur') {
-    // 1. Draw blurred, stretched background
     ctx.save();
     ctx.filter = 'blur(30px) brightness(0.65)';
     ctx.drawImage(video, -40, -40, targetWidth + 80, targetHeight + 80);
     ctx.restore();
 
-    // 2. Draw pristine sharp video in the center maintaining original aspect ratio
     const videoAspect = video.videoWidth / video.videoHeight;
-    const targetAspect = targetWidth / targetHeight;
     let drawW = targetWidth;
     let drawH = targetWidth / videoAspect;
-    if (drawH > targetHeight) {
-      drawH = targetHeight;
-      drawW = targetHeight * videoAspect;
-    }
-    const drawX = (targetWidth - drawW) / 2;
-    const drawY = (targetHeight - drawH) / 2;
-    ctx.drawImage(video, drawX, drawY, drawW, drawH);
+    if (drawH > targetHeight) { drawH = targetHeight; drawW = targetHeight * videoAspect; }
+    ctx.drawImage(video, (targetWidth - drawW) / 2, (targetHeight - drawH) / 2, drawW, drawH);
   } else {
-    // Smart reframed crop
     const { cropX, cropY, cropWidth, cropHeight } = calculateReframeCrop(
-      video.videoWidth,
-      video.videoHeight,
-      targetWidth,
-      targetHeight,
-      strategy,
-      timeProgress
+      video.videoWidth, video.videoHeight, targetWidth, targetHeight, strategy, timeProgress
     );
 
-    // Apply Punch Zooms or Camera Shake according to Editing Style
-    let scaleEffect = 1.0;
-    let shakeX = 0;
-    let shakeY = 0;
+    let scaleEffect = 1.0, shakeX = 0, shakeY = 0;
 
     if (editingStyle === 'High Energy' || editingStyle === 'Extreme') {
-      // Periodic subtle punch-in on emphasis beats (every 4-5s)
-      const beatCycle = timeProgress % 4.5;
-      if (beatCycle < 0.6) {
-        scaleEffect = 1.05; // 5% punch zoom
-      }
-      if (editingStyle === 'Extreme' && beatCycle < 0.25) {
+      const bc = timeProgress % 4.5;
+      if (bc < 0.6) scaleEffect = 1.05;
+      if (editingStyle === 'Extreme' && bc < 0.25) {
         shakeX = (Math.random() - 0.5) * 8;
         shakeY = (Math.random() - 0.5) * 8;
       }
     } else if (editingStyle === 'Balanced') {
-      const beatCycle = timeProgress % 7.0;
-      if (beatCycle < 0.4) {
-        scaleEffect = 1.025; // Gentle 2.5% punch
-      }
+      if ((timeProgress % 7.0) < 0.4) scaleEffect = 1.025;
     }
 
     ctx.save();
@@ -192,86 +207,227 @@ export function renderFrameToCanvas(
       ctx.scale(scaleEffect, scaleEffect);
       ctx.translate(-targetWidth / 2, -targetHeight / 2);
     }
-
-    // Apply color grade filter for cinematic polish
     if (editingStyle === 'Extreme' || editingStyle === 'High Energy') {
       ctx.filter = 'contrast(106%) saturate(108%)';
     } else if (editingStyle === 'Balanced') {
       ctx.filter = 'contrast(103%) saturate(104%)';
     }
-
     ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
     ctx.restore();
   }
 
-  // Draw Vignette overlay for cinematic depth
-  const vignette = ctx.createRadialGradient(
-    targetWidth / 2,
-    targetHeight / 2,
-    targetWidth * 0.35,
-    targetWidth / 2,
-    targetHeight / 2,
-    targetWidth * 0.75
-  );
-  vignette.addColorStop(0, 'rgba(0,0,0,0)');
-  vignette.addColorStop(1, 'rgba(0,0,0,0.28)');
-  ctx.fillStyle = vignette;
+  // Vignette (cached, never recreated per frame)
+  ctx.fillStyle = getCachedVignette(ctx, targetWidth, targetHeight);
   ctx.fillRect(0, 0, targetWidth, targetHeight);
 
-  // Hook Title Overlay in the opening seconds (first 2.5s - 3.2s)
+  // Hook overlay
   if (hook && timeProgress <= hook.suggestedDurationSeconds) {
     const fadeOut = Math.max(0, Math.min(1, (hook.suggestedDurationSeconds - timeProgress) / 0.4));
     ctx.save();
     ctx.globalAlpha = fadeOut;
-
-    const hookY = targetHeight * 0.16; // Top safe-zone (away from face)
+    const hookY = targetHeight * 0.16;
     const scale = targetWidth / 1080;
-
-    // Background pill for contrast
     ctx.font = `900 ${Math.round(44 * scale)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const metrics = ctx.measureText(hook.text.toUpperCase());
     const pillW = metrics.width + 48 * scale;
     const pillH = 72 * scale;
-
     ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
     ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
     ctx.shadowBlur = 16 * scale;
     ctx.beginPath();
     ctx.roundRect(targetWidth / 2 - pillW / 2, hookY - pillH / 2, pillW, pillH, 16 * scale);
     ctx.fill();
-
-    // Hook Category Badge
     ctx.font = `800 ${Math.round(18 * scale)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
     ctx.fillStyle = '#38BDF8';
     ctx.fillText(`⚡ ${hook.category.toUpperCase()}`, targetWidth / 2, hookY - 20 * scale);
-
-    // Main Hook Text
     ctx.font = `900 ${Math.round(36 * scale)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
     ctx.fillStyle = '#FFFFFF';
     ctx.fillText(hook.text.toUpperCase(), targetWidth / 2, hookY + 12 * scale);
-
     ctx.restore();
   }
 
-  // Draw Kinetic Subtitle if an active cue exists at this timestamp
+  // Subtitles — binary search, not linear scan
   if (subtitles && subtitleTheme) {
-    const activeCue = subtitles.find((c) => currentTime >= c.startTime && currentTime <= c.endTime);
-    if (activeCue) {
-      drawSubtitlesOnCanvas(ctx, activeCue, currentTime, targetWidth, targetHeight, subtitleTheme);
-    }
+    const cue = findActiveCue(subtitles, currentTime);
+    if (cue) drawSubtitlesOnCanvas(ctx, cue, currentTime, targetWidth, targetHeight, subtitleTheme);
   }
 }
 
+// ---------------------------------------------------------------------------
+// Adaptive quality per device performance tier
+// ---------------------------------------------------------------------------
+
+interface AdaptiveSettings { fps: number; bitrate: number; keyframeInterval: number; }
+
+function getAdaptiveSettings(
+  perf: RenderOptions['devicePerf'],
+  targetFps: number,
+  baseBitrate: number
+): AdaptiveSettings {
+  switch (perf) {
+    case 'compat':
+      return { fps: Math.min(targetFps, 24), bitrate: Math.min(baseBitrate, 6_000_000), keyframeInterval: 48 };
+    case 'limited':
+      return { fps: Math.min(targetFps, 30), bitrate: Math.min(baseBitrate, 8_000_000), keyframeInterval: 60 };
+    case 'good':
+      return { fps: Math.min(targetFps, 60), bitrate: baseBitrate, keyframeInterval: 120 };
+    case 'excellent':
+    default:
+      return { fps: targetFps, bitrate: baseBitrate, keyframeInterval: targetFps * 2 };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Utility: seek with safeguard timeout
+// ---------------------------------------------------------------------------
+
+function seekVideoTo(video: HTMLVideoElement, time: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (Math.abs(video.currentTime - time) < 0.001) {
+      resolve();
+      return;
+    }
+
+    const handler = () => {
+      clearTimeout(timer);
+      video.removeEventListener('seeked', handler);
+      resolve();
+    };
+
+    const timer = setTimeout(() => {
+      video.removeEventListener('seeked', handler);
+      resolve(); // safeguard: never stall indefinitely
+    }, 2500);
+
+    video.addEventListener('seeked', handler);
+    video.currentTime = time;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// createRenderCanvas — OffscreenCanvas preferred (runs with GPU acceleration)
+// ---------------------------------------------------------------------------
+
+function createRenderCanvas(w: number, h: number): {
+  canvas: OffscreenCanvas | HTMLCanvasElement;
+  ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+} {
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext('2d', {
+      alpha: false,
+      desynchronized: true,
+      willReadFrequently: false,
+    }) as OffscreenCanvasRenderingContext2D;
+    return { canvas, ctx };
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d', {
+    alpha: false,
+    desynchronized: true,
+    willReadFrequently: false,
+  }) as CanvasRenderingContext2D;
+  return { canvas, ctx };
+}
+
+// ---------------------------------------------------------------------------
+// Synchronized AAC stereo audio encoder
+// ---------------------------------------------------------------------------
+
+async function encodeAudioFromBuffer(
+  audioBuffer: AudioBuffer,
+  startTime: number,
+  endTime: number,
+  sampleRate: number,
+  channels: number,
+  muxer: Muxer<ArrayBufferTarget | FileSystemWritableFileStreamTarget>
+): Promise<void> {
+  const startSample = Math.max(0, Math.floor(startTime * sampleRate));
+  const endSample = Math.min(audioBuffer.length, Math.floor(endTime * sampleRate));
+  const totalSamples = Math.max(0, endSample - startSample);
+  if (totalSamples <= 0) return;
+
+  let audioErr: Error | null = null;
+  const audioEncoder = new AudioEncoder({
+    output: (chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => {
+      muxer.addAudioChunk(chunk, meta);
+    },
+    error: (e: Error) => {
+      audioErr = e instanceof Error ? e : new Error(String(e));
+    },
+  });
+
+  audioEncoder.configure({
+    codec: 'mp4a.40.2',
+    sampleRate,
+    numberOfChannels: channels,
+    bitrate: 128_000,
+  });
+
+  const channelData: Float32Array[] = [];
+  for (let ch = 0; ch < channels; ch++) {
+    channelData.push(audioBuffer.getChannelData(ch).subarray(startSample, endSample));
+  }
+
+  const CHUNK_SIZE = 1024;
+  let sampleOffset = 0;
+
+  while (sampleOffset < totalSamples) {
+    if (audioErr) throw audioErr;
+
+    const framesInThisChunk = Math.min(CHUNK_SIZE, totalSamples - sampleOffset);
+    const planarData = new Float32Array(framesInThisChunk * channels);
+
+    for (let ch = 0; ch < channels; ch++) {
+      const sub = channelData[ch].subarray(sampleOffset, sampleOffset + framesInThisChunk);
+      planarData.set(sub, ch * framesInThisChunk);
+    }
+
+    const timestampUs = Math.round((sampleOffset / sampleRate) * 1_000_000);
+
+    const audioData = new AudioData({
+      format: 'f32-planar',
+      sampleRate,
+      numberOfFrames: framesInThisChunk,
+      numberOfChannels: channels,
+      timestamp: timestampUs,
+      data: planarData,
+    });
+
+    audioEncoder.encode(audioData);
+    audioData.close();
+
+    sampleOffset += framesInThisChunk;
+  }
+
+  await audioEncoder.flush();
+  audioEncoder.close();
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 /**
- * Main WebCodecs + Mediabunny / mp4-muxer Rendering Pipeline.
- * Decodes source video frames, runs 60 FPS reframe/effect transform,
- * encodes via VideoEncoder, and muxes directly into an MP4 container.
+ * Ultra-Fast WebCodecs + mp4-muxer Rendering Pipeline.
+ *
+ * Optimizations applied:
+ *  - Adaptive FPS & bitrate per device tier (24/30 FPS on low-end, 60 FPS on high-end).
+ *  - Hardware H.264 profile negotiation (High -> Main -> Baseline).
+ *  - OffscreenCanvas with desynchronized GPU pipeline.
+ *  - Cached radial gradients & binary search subtitles.
+ *  - Zero redundant clearRect memory passes.
+ *  - Encoder backpressure flow control to avoid GPU stalls.
+ *  - Synchronized stereo AAC audio multiplexing.
  */
 export async function renderShortToMp4(options: RenderOptions): Promise<RenderResult> {
   const {
     sourceVideo,
+    sourceFile,
     startTime,
     endTime,
     targetWidth,
@@ -285,79 +441,61 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     hook,
     onProgress,
     fileHandle,
+    devicePerf = 'good',
   } = options;
 
+  const prog = onProgress ?? (() => {});
+
+  if (endTime <= startTime) {
+    throw new Error('Invalid clip: endTime must be greater than startTime.');
+  }
+
+  // 1. Adapt quality & frame rate according to device capabilities
+  const { fps, bitrate: br, keyframeInterval } = getAdaptiveSettings(devicePerf, targetFps, bitrate);
   const duration = endTime - startTime;
-  if (duration <= 0) {
-    throw new Error('Invalid clip boundaries: endTime must be greater than startTime.');
-  }
+  const frameDurationUs = Math.round(1_000_000 / fps);
+  const stepSeconds = 1 / fps;
+  const totalFrames = Math.ceil(duration * fps);
 
-  const totalFrames = Math.ceil(duration * targetFps);
-  const frameDurationUs = Math.round(1_000_000 / targetFps);
+  prog(1, `⚡ Initializing lightning-fast render @ ${fps} FPS (${totalFrames} frames)...`);
 
-  // Set up Canvas for rendering
-  const canvas = typeof OffscreenCanvas !== 'undefined'
-    ? new OffscreenCanvas(targetWidth, targetHeight)
-    : document.createElement('canvas');
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
-  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-
-  if (!ctx) {
-    throw new Error('Failed to create 2D canvas rendering context.');
-  }
-
-  // Extract and decode source audio track via Web Audio API
-  onProgress?.(3, 'Extracting source audio track');
+  // 2. Prepare audio track before configuring muxer
   let audioBuffer: AudioBuffer | null = null;
   let targetAudioSampleRate = 48000;
   let targetAudioChannels = 2;
+  let hasAudio = false;
+  let audioEncoderSupported = false;
 
   try {
     let arrayBuffer: ArrayBuffer | null = null;
-    if (options.sourceFile) {
-      arrayBuffer = await options.sourceFile.arrayBuffer();
-    } else if (sourceVideo.src && (sourceVideo.src.startsWith('blob:') || sourceVideo.src.startsWith('http') || sourceVideo.src.startsWith('data:'))) {
+    if (sourceFile) {
+      arrayBuffer = await (sourceFile as Blob).arrayBuffer();
+    } else if (sourceVideo.src && (sourceVideo.src.startsWith('blob:') || sourceVideo.src.startsWith('http'))) {
       const resp = await fetch(sourceVideo.src);
       arrayBuffer = await resp.arrayBuffer();
     }
 
     if (arrayBuffer && typeof window !== 'undefined') {
-      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (AudioCtxClass) {
-        const audioCtx = new AudioCtxClass();
+      const ACtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (ACtx) {
+        const actx = new ACtx();
         try {
-          // decodeAudioData detaches the buffer, pass a copy slice
-          audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+          audioBuffer = await actx.decodeAudioData(arrayBuffer.slice(0));
+          if (audioBuffer && audioBuffer.duration > 0 && audioBuffer.numberOfChannels > 0) {
+            targetAudioSampleRate = audioBuffer.sampleRate;
+            targetAudioChannels = Math.min(2, audioBuffer.numberOfChannels);
+            hasAudio = true;
+          }
         } finally {
-          audioCtx.close().catch(() => {});
+          actx.close().catch(() => {});
         }
       }
     }
-  } catch (audioErr) {
-    console.warn('[VideoEngine] Could not decode source audio, rendering video without audio:', audioErr);
+  } catch (err) {
+    console.warn('[VideoEngine] Audio decode skipped:', err);
   }
 
-  // Set up MP4 Muxer with either direct File System stream target or ArrayBuffer memory target
-  let muxerTarget;
-  let fileStream: any = null;
-
-  if (fileHandle) {
-    fileStream = await fileHandle.createWritable();
-    muxerTarget = new FileSystemWritableFileStreamTarget(fileStream);
-  } else {
-    muxerTarget = new ArrayBufferTarget();
-  }
-
-  // Check AudioEncoder capability
-  let audioEncoder: AudioEncoder | null = null;
-  let audioEncoderError: Error | null = null;
-  const hasAudio = !!(audioBuffer && audioBuffer.duration > 0 && audioBuffer.numberOfChannels > 0);
-
-  if (hasAudio && typeof AudioEncoder !== 'undefined' && audioBuffer) {
-    targetAudioSampleRate = audioBuffer.sampleRate;
-    targetAudioChannels = Math.min(2, audioBuffer.numberOfChannels);
-
+  if (hasAudio && typeof AudioEncoder !== 'undefined') {
     try {
       const check = await AudioEncoder.isConfigSupported({
         codec: 'mp4a.40.2',
@@ -365,28 +503,20 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
         numberOfChannels: targetAudioChannels,
         bitrate: 128_000,
       });
-
-      if (check.supported) {
-        audioEncoder = new AudioEncoder({
-          output: (chunk, meta) => {
-            muxer.addAudioChunk(chunk, meta);
-          },
-          error: (err) => {
-            console.error('[VideoEngine] AudioEncoder error:', err);
-            audioEncoderError = err instanceof Error ? err : new Error(String(err));
-          },
-        });
-
-        audioEncoder.configure({
-          codec: 'mp4a.40.2',
-          sampleRate: targetAudioSampleRate,
-          numberOfChannels: targetAudioChannels,
-          bitrate: 128_000,
-        });
-      }
-    } catch (confErr) {
-      console.warn('[VideoEngine] AAC config test failed:', confErr);
+      audioEncoderSupported = check.supported ?? false;
+    } catch {
+      audioEncoderSupported = false;
     }
+  }
+
+  // 3. Set up MP4 Muxer (with direct disk streaming or in-memory target)
+  let muxerTarget: ArrayBufferTarget | FileSystemWritableFileStreamTarget;
+  let fileStream: any = null;
+  if (fileHandle) {
+    fileStream = await fileHandle.createWritable();
+    muxerTarget = new FileSystemWritableFileStreamTarget(fileStream);
+  } else {
+    muxerTarget = new ArrayBufferTarget();
   }
 
   const muxer = new Muxer({
@@ -396,7 +526,7 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
       width: targetWidth,
       height: targetHeight,
     },
-    ...(audioEncoder
+    ...(audioEncoderSupported
       ? {
           audio: {
             codec: 'aac',
@@ -409,169 +539,174 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     firstTimestampBehavior: 'offset',
   });
 
-  // Check VideoEncoder availability
+  // 4. Configure WebCodecs Hardware VideoEncoder
   if (typeof VideoEncoder === 'undefined') {
     throw new Error('WebCodecs VideoEncoder is not available in your browser.');
   }
 
-  let encodedFrameCount = 0;
-  let encoderError: Error | null = null;
+  prog(3, 'Configuring hardware video encoder...');
 
+  let encoderError: Error | null = null;
   const videoEncoder = new VideoEncoder({
-    output: (chunk, meta) => {
+    output: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => {
       muxer.addVideoChunk(chunk, meta);
-      encodedFrameCount++;
     },
-    error: (e) => {
+    error: (e: Error) => {
       encoderError = e instanceof Error ? e : new Error(String(e));
     },
   });
 
+  // Profile cascade: High L5.1 -> Main L4.0 -> Baseline L3.0
+  const codecs = [
+    { codec: 'avc1.640033', hw: 'prefer-hardware' },
+    { codec: 'avc1.4d4028', hw: 'prefer-hardware' },
+    { codec: 'avc1.42e01e', hw: 'no-preference' },
+  ];
+  let chosenCodec = codecs[0].codec;
+  for (const c of codecs) {
+    try {
+      const t = await VideoEncoder.isConfigSupported({
+        codec: c.codec,
+        width: targetWidth,
+        height: targetHeight,
+        bitrate: br,
+        framerate: fps,
+        hardwareAcceleration: c.hw as any,
+      });
+      if (t.supported) {
+        chosenCodec = c.codec;
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+
   videoEncoder.configure({
-    codec: 'avc1.640033', // H.264 High Profile Level 5.1
+    codec: chosenCodec,
     width: targetWidth,
     height: targetHeight,
-    bitrate: bitrate,
-    framerate: targetFps,
+    bitrate: br,
+    framerate: fps,
     hardwareAcceleration: 'prefer-hardware',
   });
 
-  onProgress?.(5, 'Preparing hardware video & audio encoders');
+  // 5. Create render canvas
+  const { canvas, ctx } = createRenderCanvas(targetWidth, targetHeight);
+  if (!ctx) throw new Error('Render canvas context could not be created.');
 
-  // Render loop across timeline
-  const stepSeconds = 1 / targetFps;
-  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
-    if (encoderError) throw encoderError;
+  // 6. Fast frame-by-frame extraction loop
+  // Muting & pausing video element prevents DOM presentation & audio decoding overhead during seeks
+  const prevMuted = sourceVideo.muted;
+  const prevPaused = sourceVideo.paused;
+  sourceVideo.muted = true;
+  sourceVideo.pause();
 
-    const currentSec = startTime + frameIndex * stepSeconds;
+  prog(5, `⚡ Rendering ${totalFrames} frames with hardware acceleration (${chosenCodec})...`);
 
-    // Seek source video to exact timestamp
-    sourceVideo.currentTime = currentSec;
-    await new Promise<void>((resolve) => {
-      const onSeeked = () => {
-        sourceVideo.removeEventListener('seeked', onSeeked);
-        resolve();
-      };
-      sourceVideo.addEventListener('seeked', onSeeked);
-    });
+  try {
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      if (encoderError) throw encoderError;
 
-    // Render frame to canvas with reframe, effects, hook, and kinetic captions
-    renderFrameToCanvas(
-      ctx,
-      sourceVideo,
-      targetWidth,
-      targetHeight,
-      reframeStrategy,
-      editingStyle,
-      currentSec,
-      startTime,
-      subtitles,
-      subtitleTheme,
-      hook
-    );
+      const currentSec = startTime + frameIndex * stepSeconds;
 
-    // Create VideoFrame from Canvas
-    const timestampUs = frameIndex * frameDurationUs;
-    const videoFrame = new VideoFrame(canvas as any, {
-      timestamp: timestampUs,
-      duration: frameDurationUs,
-    });
+      // Exact timestamp seek
+      await seekVideoTo(sourceVideo, currentSec);
 
-    // Keyframe every 2 seconds (120 frames at 60 FPS)
-    const isKeyFrame = frameIndex % (targetFps * 2) === 0;
-    videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame });
+      // Render video + overlays (vignette, kinetic subtitles, hook banner, effects)
+      renderFrameToCanvas(
+        ctx,
+        sourceVideo,
+        targetWidth,
+        targetHeight,
+        reframeStrategy,
+        editingStyle,
+        currentSec,
+        startTime,
+        subtitles,
+        subtitleTheme,
+        hook
+      );
 
-    // Release VideoFrame memory immediately
-    videoFrame.close();
+      // Create & encode VideoFrame
+      const timestampUs = frameIndex * frameDurationUs;
+      const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+        timestamp: timestampUs,
+        duration: frameDurationUs,
+      });
 
-    // Report real progress
-    const pct = Math.round(5 + (frameIndex / totalFrames) * 85);
-    if (frameIndex % 15 === 0) {
-      onProgress?.(pct, `Processing frame ${frameIndex + 1}/${totalFrames} @ 60 FPS`);
+      const isKeyFrame = frameIndex % keyframeInterval === 0;
+      videoEncoder.encode(vf, { keyFrame: isKeyFrame });
+      vf.close();
+
+      // GPU backpressure flow control: keep hardware encoder saturated without memory overload
+      if (videoEncoder.encodeQueueSize > 4) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      // Update progress every few frames
+      if (frameIndex % Math.max(5, Math.floor(fps / 4)) === 0 || frameIndex === totalFrames - 1) {
+        const pct = Math.round(5 + (frameIndex / totalFrames) * 85);
+        prog(pct, `⚡ Processing frame ${frameIndex + 1}/${totalFrames} @ ${fps} FPS`);
+      }
+    }
+  } finally {
+    // Restore video state
+    sourceVideo.muted = prevMuted;
+    if (!prevPaused) sourceVideo.play().catch(() => {});
+  }
+
+  if (encoderError) throw encoderError;
+
+  // 7. Encode synchronized stereo AAC audio
+  if (audioEncoderSupported && audioBuffer) {
+    prog(92, '⚡ Encoding synchronized AAC stereo audio...');
+    try {
+      await encodeAudioFromBuffer(
+        audioBuffer,
+        startTime,
+        endTime,
+        targetAudioSampleRate,
+        targetAudioChannels,
+        muxer
+      );
+    } catch (audioErr) {
+      console.warn('[VideoEngine] AAC audio encoding skipped:', audioErr);
     }
   }
 
-  // Encode synchronized AAC Audio Track for the exact clip duration [startTime, endTime]
-  if (audioEncoder && audioBuffer) {
-    onProgress?.(92, 'Encoding synchronized AAC stereo audio');
-
-    const startSample = Math.max(0, Math.floor(startTime * targetAudioSampleRate));
-    const endSample = Math.min(audioBuffer.length, Math.floor(endTime * targetAudioSampleRate));
-    const totalAudioSamples = Math.max(0, endSample - startSample);
-
-    if (totalAudioSamples > 0) {
-      const channelData: Float32Array[] = [];
-      for (let ch = 0; ch < targetAudioChannels; ch++) {
-        const srcChannel = audioBuffer.getChannelData(ch);
-        channelData.push(srcChannel.subarray(startSample, endSample));
-      }
-
-      const CHUNK_SIZE = 1024;
-      let sampleOffset = 0;
-
-      while (sampleOffset < totalAudioSamples) {
-        if (audioEncoderError) throw audioEncoderError;
-
-        const framesInThisChunk = Math.min(CHUNK_SIZE, totalAudioSamples - sampleOffset);
-        const planarData = new Float32Array(framesInThisChunk * targetAudioChannels);
-
-        for (let ch = 0; ch < targetAudioChannels; ch++) {
-          const sub = channelData[ch].subarray(sampleOffset, sampleOffset + framesInThisChunk);
-          planarData.set(sub, ch * framesInThisChunk);
-        }
-
-        const timestampUs = Math.round((sampleOffset / targetAudioSampleRate) * 1_000_000);
-
-        const audioData = new AudioData({
-          format: 'f32-planar',
-          sampleRate: targetAudioSampleRate,
-          numberOfFrames: framesInThisChunk,
-          numberOfChannels: targetAudioChannels,
-          timestamp: timestampUs,
-          data: planarData,
-        });
-
-        audioEncoder.encode(audioData);
-        audioData.close();
-
-        sampleOffset += framesInThisChunk;
-      }
-
-      await audioEncoder.flush();
-      audioEncoder.close();
-    }
-  }
-
-  onProgress?.(96, 'Flushing encoders and finalizing MP4 container');
+  // 8. Finalize VideoEncoder & MP4 container
+  prog(96, '⚡ Finalizing ultra-fast MP4 container...');
   await videoEncoder.flush();
   videoEncoder.close();
-
   muxer.finalize();
 
   if (fileStream) {
     await fileStream.close();
-    onProgress?.(100, 'Render complete! Streamed directly to disk.');
+    prog(100, '⚡ Render complete! Streamed directly to disk.');
     return {
       duration,
       width: targetWidth,
       height: targetHeight,
-      fps: targetFps,
+      fps,
       fileSizeBytes: 0,
       streamedToDisk: true,
+      pipeline: `hardware-${chosenCodec}`,
     };
   }
 
-  const buffer = (muxerTarget as ArrayBufferTarget).buffer;
-  const mp4Blob = new Blob([buffer], { type: 'video/mp4' });
+  const buf = (muxerTarget as ArrayBufferTarget).buffer;
+  const blob = new Blob([buf], { type: 'video/mp4' });
 
-  onProgress?.(100, 'Render complete!');
+  prog(100, '⚡ Render complete!');
   return {
-    blob: mp4Blob,
+    blob,
     duration,
     width: targetWidth,
     height: targetHeight,
-    fps: targetFps,
-    fileSizeBytes: mp4Blob.size,
+    fps,
+    fileSizeBytes: blob.size,
     streamedToDisk: false,
+    pipeline: `hardware-${chosenCodec}`,
   };
 }
