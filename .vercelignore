@@ -1,0 +1,28 @@
+# Vercel Ignore file
+# Ignore local video uploads and test files that exceed Vercel's 100MB limit
+uploads/
+data/
+*.mp4
+test_*.mp4
+
+# Build caches & outputs (Vercel builds them freshly on the server)
+.next/
+apps/web/.next/
+apps/web/out/
+dist/
+build/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Git & Docker
+.git/
+Dockerfile*
+docker-compose.yml
+
+# Environment & logs
+.env*.local
+*.log
