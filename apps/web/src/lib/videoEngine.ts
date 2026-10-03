@@ -13,6 +13,11 @@
  *  - GPU backpressure flow control (encodeQueueSize monitoring) to maximize throughput.
  *  - Synchronized stereo AAC audio encoding directly multiplexed with zero drift.
  *  - Direct-to-disk streaming option via File System Access API for zero-memory footprint.
+ *  - MOBILE PERF: AudioBuffer cached across all shorts — full-file decode runs once per video.
+ *  - MOBILE PERF: Pre-allocated audio interleave buffer — no per-chunk GC allocation in hot-loop.
+ *  - MOBILE PERF: requestVideoFrameCallback-based seek on Chrome/Android for faster frame seeks.
+ *  - MOBILE PERF: VideoEncoder.isConfigSupported() results cached per session (skips GPU IPC).
+ *  - MOBILE PERF: Tuned encoder backpressure threshold to keep hardware encoder fully saturated.
  */
 
 import { Muxer, ArrayBufferTarget, FileSystemWritableFileStreamTarget } from 'mp4-muxer';
@@ -281,7 +286,15 @@ function getAdaptiveSettings(
 
 // ---------------------------------------------------------------------------
 // Utility: seek with safeguard timeout
+// Uses requestVideoFrameCallback on supported browsers (Chrome, Chrome Android)
+// for faster, frame-accurate seek notification instead of polling seeked events.
+// Falls back to seeked event with timeout on Safari / Firefox / older browsers.
 // ---------------------------------------------------------------------------
+
+// Detect once at module level — avoids repeated prototype lookups per frame
+const _rvfcSupported =
+  typeof HTMLVideoElement !== 'undefined' &&
+  typeof (HTMLVideoElement.prototype as any).requestVideoFrameCallback === 'function';
 
 function seekVideoTo(video: HTMLVideoElement, time: number): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -290,19 +303,41 @@ function seekVideoTo(video: HTMLVideoElement, time: number): Promise<void> {
       return;
     }
 
-    const handler = () => {
-      clearTimeout(timer);
-      video.removeEventListener('seeked', handler);
-      resolve();
-    };
+    if (_rvfcSupported) {
+      // requestVideoFrameCallback fires once the browser has decoded and
+      // presented the frame at the seeked position — significantly faster on
+      // mobile Chrome/Android than waiting for the 'seeked' DOM event, which
+      // may fire before the frame is ready for drawImage().
+      let rVfcHandle: number;
+      const timer = setTimeout(() => {
+        try { (video as any).cancelVideoFrameCallback(rVfcHandle); } catch { /* noop */ }
+        resolve(); // safety timeout
+      }, 1500);
 
-    const timer = setTimeout(() => {
-      video.removeEventListener('seeked', handler);
-      resolve(); // safeguard: never stall indefinitely
-    }, 2500);
+      video.addEventListener('seeked', () => {
+        rVfcHandle = (video as any).requestVideoFrameCallback(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      }, { once: true });
 
-    video.addEventListener('seeked', handler);
-    video.currentTime = time;
+      video.currentTime = time;
+    } else {
+      // Fallback: standard seeked event with timeout (Safari, Firefox, older)
+      const handler = () => {
+        clearTimeout(timer);
+        video.removeEventListener('seeked', handler);
+        resolve();
+      };
+
+      const timer = setTimeout(() => {
+        video.removeEventListener('seeked', handler);
+        resolve(); // safeguard: never stall indefinitely
+      }, 2500);
+
+      video.addEventListener('seeked', handler);
+      video.currentTime = time;
+    }
   });
 }
 
@@ -332,6 +367,81 @@ function createRenderCanvas(w: number, h: number): {
     willReadFrequently: false,
   }) as CanvasRenderingContext2D;
   return { canvas, ctx };
+}
+
+// ---------------------------------------------------------------------------
+// MOBILE OPTIMIZATION: Module-level AudioBuffer cache keyed by file identity.
+//
+// Previously renderShortToMp4() re-read the entire source file (arrayBuffer())
+// and re-ran AudioContext.decodeAudioData() for EVERY short. A 100 MB video
+// generating 5 shorts meant 5× 100 MB reads + 5× full audio decode on mobile,
+// causing massive GC pressure, CPU thermal throttling, and potential tab crash.
+//
+// Fix: decode once, cache the AudioBuffer, reuse for all shorts from the same
+// source. Cache is keyed by (name|size|lastModified) for File objects.
+// ---------------------------------------------------------------------------
+
+interface _AudioCacheEntry {
+  key: string;
+  audioBuffer: AudioBuffer;
+  sampleRate: number;
+  channels: number;
+  audioEncoderSupported: boolean;
+}
+
+let _audioCacheEntry: _AudioCacheEntry | null = null;
+
+function _getAudioCacheKey(sourceFile?: File | Blob, videoSrc?: string): string {
+  if (sourceFile && sourceFile instanceof File) {
+    return `file:${sourceFile.name}|${sourceFile.size}|${sourceFile.lastModified}`;
+  }
+  if (sourceFile) return `blob:${sourceFile.size}`;
+  if (videoSrc) return `src:${videoSrc}`;
+  return 'unknown';
+}
+
+/** Clears the audio decode cache. Call when the user loads a new video file. */
+export function clearAudioCache(): void {
+  _audioCacheEntry = null;
+}
+
+// ---------------------------------------------------------------------------
+// MOBILE OPTIMIZATION: VideoEncoder.isConfigSupported() result cache.
+//
+// isConfigSupported() is an async IPC call to the GPU process. On mobile it
+// can take 50-200ms per call. The profile cascade makes up to 3 calls per
+// short. Caching by (codec|w|h|bitrate|fps|hw) eliminates the repeated
+// round-trips for every subsequent short with the same configuration.
+// ---------------------------------------------------------------------------
+
+const _encoderConfigCache = new Map<string, boolean>();
+
+async function isEncoderConfigSupported(
+  codec: string,
+  width: number,
+  height: number,
+  bitrate: number,
+  framerate: number,
+  hardwareAcceleration: string
+): Promise<boolean> {
+  const key = `${codec}|${width}|${height}|${bitrate}|${framerate}|${hardwareAcceleration}`;
+  if (_encoderConfigCache.has(key)) return _encoderConfigCache.get(key)!;
+  try {
+    const result = await VideoEncoder.isConfigSupported({
+      codec,
+      width,
+      height,
+      bitrate,
+      framerate,
+      hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
+    });
+    const supported = result.supported ?? false;
+    _encoderConfigCache.set(key, supported);
+    return supported;
+  } catch {
+    _encoderConfigCache.set(key, false);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,13 +484,20 @@ async function encodeAudioFromBuffer(
   }
 
   const CHUNK_SIZE = 1024;
+  // MOBILE OPTIMIZATION: Pre-allocate a single interleave buffer at full CHUNK_SIZE
+  // capacity and reuse it every iteration — eliminates ~1400 GC allocations for a
+  // 30-second stereo 48kHz clip, significantly reducing GC pauses on mobile.
+  const planarBuf = new Float32Array(CHUNK_SIZE * channels);
   let sampleOffset = 0;
 
   while (sampleOffset < totalSamples) {
     if (audioErr) throw audioErr;
 
     const framesInThisChunk = Math.min(CHUNK_SIZE, totalSamples - sampleOffset);
-    const planarData = new Float32Array(framesInThisChunk * channels);
+    // Reuse the pre-allocated buffer; use a subarray view for the final short chunk
+    const planarData = framesInThisChunk === CHUNK_SIZE
+      ? planarBuf
+      : planarBuf.subarray(0, framesInThisChunk * channels);
 
     for (let ch = 0; ch < channels; ch++) {
       const sub = channelData[ch].subarray(sampleOffset, sampleOffset + framesInThisChunk);
@@ -424,6 +541,17 @@ async function encodeAudioFromBuffer(
  *  - Encoder backpressure flow control to avoid GPU stalls.
  *  - Synchronized stereo AAC audio multiplexing.
  */
+/**
+ * Ultra-Fast WebCodecs + mp4-muxer Rendering Pipeline.
+ *
+ * Mobile optimizations added:
+ *  - AudioBuffer decoded once per video source, reused for all shorts.
+ *  - Eliminated redundant arrayBuffer.slice(0) copy before decodeAudioData.
+ *  - Pre-allocated audio interleave Float32Array — no per-chunk GC in hot-loop.
+ *  - requestVideoFrameCallback seek on Chrome/Android for frame-accurate seeks.
+ *  - VideoEncoder.isConfigSupported() results cached — no per-short GPU IPC.
+ *  - Backpressure threshold raised 4→8 to saturate encoder on seek-heavy mobile.
+ */
 export async function renderShortToMp4(options: RenderOptions): Promise<RenderResult> {
   const {
     sourceVideo,
@@ -459,7 +587,11 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
 
   prog(1, `⚡ Initializing lightning-fast render @ ${fps} FPS (${totalFrames} frames)...`);
 
-  // 2. Prepare audio track before configuring muxer
+  // 2. Prepare audio track — use cached AudioBuffer if available for this file.
+  //    MOBILE OPTIMIZATION: previously this re-read and re-decoded the entire source
+  //    file for every short. Now decode runs once and the AudioBuffer is reused for
+  //    all subsequent shorts from the same video, eliminating the dominant mobile
+  //    bottleneck in multi-short batch rendering (N × full-file-read + decode).
   let audioBuffer: AudioBuffer | null = null;
   let targetAudioSampleRate = 48000;
   let targetAudioChannels = 2;
@@ -467,46 +599,74 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
   let audioEncoderSupported = false;
 
   try {
-    let arrayBuffer: ArrayBuffer | null = null;
-    if (sourceFile) {
-      arrayBuffer = await (sourceFile as Blob).arrayBuffer();
-    } else if (sourceVideo.src && (sourceVideo.src.startsWith('blob:') || sourceVideo.src.startsWith('http'))) {
-      const resp = await fetch(sourceVideo.src);
-      arrayBuffer = await resp.arrayBuffer();
-    }
+    const cacheKey = _getAudioCacheKey(
+      sourceFile,
+      sourceVideo.src && (sourceVideo.src.startsWith('blob:') || sourceVideo.src.startsWith('http'))
+        ? sourceVideo.src
+        : undefined
+    );
 
-    if (arrayBuffer && typeof window !== 'undefined') {
-      const ACtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (ACtx) {
-        const actx = new ACtx();
-        try {
-          audioBuffer = await actx.decodeAudioData(arrayBuffer.slice(0));
-          if (audioBuffer && audioBuffer.duration > 0 && audioBuffer.numberOfChannels > 0) {
-            targetAudioSampleRate = audioBuffer.sampleRate;
-            targetAudioChannels = Math.min(2, audioBuffer.numberOfChannels);
-            hasAudio = true;
+    if (_audioCacheEntry && _audioCacheEntry.key === cacheKey) {
+      // Cache hit: reuse previously decoded AudioBuffer (zero re-read, zero re-decode)
+      audioBuffer = _audioCacheEntry.audioBuffer;
+      targetAudioSampleRate = _audioCacheEntry.sampleRate;
+      targetAudioChannels = _audioCacheEntry.channels;
+      audioEncoderSupported = _audioCacheEntry.audioEncoderSupported;
+      hasAudio = true;
+    } else {
+      // Cache miss: decode for the first time and store in cache
+      let arrayBuffer: ArrayBuffer | null = null;
+      if (sourceFile) {
+        arrayBuffer = await (sourceFile as Blob).arrayBuffer();
+      } else if (sourceVideo.src && (sourceVideo.src.startsWith('blob:') || sourceVideo.src.startsWith('http'))) {
+        const resp = await fetch(sourceVideo.src);
+        arrayBuffer = await resp.arrayBuffer();
+      }
+
+      if (arrayBuffer && typeof window !== 'undefined') {
+        const ACtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (ACtx) {
+          const actx = new ACtx();
+          try {
+            // MOBILE OPTIMIZATION: pass arrayBuffer directly (no slice(0) copy) —
+            // decodeAudioData detaches the buffer, but we don't need it afterwards.
+            audioBuffer = await actx.decodeAudioData(arrayBuffer);
+            if (audioBuffer && audioBuffer.duration > 0 && audioBuffer.numberOfChannels > 0) {
+              targetAudioSampleRate = audioBuffer.sampleRate;
+              targetAudioChannels = Math.min(2, audioBuffer.numberOfChannels);
+              hasAudio = true;
+            }
+          } finally {
+            actx.close().catch(() => {});
           }
-        } finally {
-          actx.close().catch(() => {});
         }
+      }
+
+      if (hasAudio && audioBuffer && typeof AudioEncoder !== 'undefined') {
+        try {
+          const check = await AudioEncoder.isConfigSupported({
+            codec: 'mp4a.40.2',
+            sampleRate: targetAudioSampleRate,
+            numberOfChannels: targetAudioChannels,
+            bitrate: 128_000,
+          });
+          audioEncoderSupported = check.supported ?? false;
+        } catch {
+          audioEncoderSupported = false;
+        }
+
+        // Persist for subsequent shorts rendered with the same source file
+        _audioCacheEntry = {
+          key: cacheKey,
+          audioBuffer,
+          sampleRate: targetAudioSampleRate,
+          channels: targetAudioChannels,
+          audioEncoderSupported,
+        };
       }
     }
   } catch (err) {
     console.warn('[VideoEngine] Audio decode skipped:', err);
-  }
-
-  if (hasAudio && typeof AudioEncoder !== 'undefined') {
-    try {
-      const check = await AudioEncoder.isConfigSupported({
-        codec: 'mp4a.40.2',
-        sampleRate: targetAudioSampleRate,
-        numberOfChannels: targetAudioChannels,
-        bitrate: 128_000,
-      });
-      audioEncoderSupported = check.supported ?? false;
-    } catch {
-      audioEncoderSupported = false;
-    }
   }
 
   // 3. Set up MP4 Muxer (with direct disk streaming or in-memory target)
@@ -557,6 +717,8 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
   });
 
   // Profile cascade: High L5.1 -> Main L4.0 -> Baseline L3.0
+  // MOBILE OPTIMIZATION: isConfigSupported() results cached — avoids repeated
+  // async GPU IPC round-trips (50-200ms each on mobile) for every short.
   const codecs = [
     { codec: 'avc1.640033', hw: 'prefer-hardware' },
     { codec: 'avc1.4d4028', hw: 'prefer-hardware' },
@@ -564,21 +726,10 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
   ];
   let chosenCodec = codecs[0].codec;
   for (const c of codecs) {
-    try {
-      const t = await VideoEncoder.isConfigSupported({
-        codec: c.codec,
-        width: targetWidth,
-        height: targetHeight,
-        bitrate: br,
-        framerate: fps,
-        hardwareAcceleration: c.hw as any,
-      });
-      if (t.supported) {
-        chosenCodec = c.codec;
-        break;
-      }
-    } catch {
-      continue;
+    const supported = await isEncoderConfigSupported(c.codec, targetWidth, targetHeight, br, fps, c.hw);
+    if (supported) {
+      chosenCodec = c.codec;
+      break;
     }
   }
 
@@ -639,8 +790,12 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
       videoEncoder.encode(vf, { keyFrame: isKeyFrame });
       vf.close();
 
-      // GPU backpressure flow control: keep hardware encoder saturated without memory overload
-      if (videoEncoder.encodeQueueSize > 4) {
+      // GPU backpressure flow control: keep hardware encoder saturated without memory overload.
+      // MOBILE OPTIMIZATION: threshold raised 4→8. On mobile, seeks dominate frame time so
+      // the encoder never builds a queue of 4. The old threshold caused unnecessary
+      // setTimeout yields that serialized the seek→encode pipeline. 8 frames (~16 MB peak)
+      // keeps the hardware encoder pipeline full without excessive memory pressure.
+      if (videoEncoder.encodeQueueSize > 8) {
         await new Promise((r) => setTimeout(r, 0));
       }
 

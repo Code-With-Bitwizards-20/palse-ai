@@ -56,6 +56,7 @@ import {
 import {
   renderShortToMp4,
   renderFrameToCanvas,
+  clearAudioCache,
   ReframeStrategy,
   EditingStyle,
   RenderResult,
@@ -156,6 +157,8 @@ export default function StudioPage() {
   };
 
   const loadVideoFile = (file: File) => {
+    // Invalidate the audio decode cache whenever a new source file is loaded
+    clearAudioCache();
     setVideoFile(file);
     const url = URL.createObjectURL(file);
     setVideoSrc(url);
