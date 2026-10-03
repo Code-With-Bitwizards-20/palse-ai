@@ -41,16 +41,23 @@ export function Navbar() {
   }, [pathname]);
 
   // Prevent body scroll when sidebar is open
-  // Use classList instead of style.overflow mutation to avoid forced reflow
+  // Use position:fixed on body — overflow:hidden breaks touch events
+  // on fixed elements in mobile Safari/Chrome
   useEffect(() => {
     if (sidebarOpen) {
-      document.body.classList.add('no-scroll');
-    } else {
-      document.body.classList.remove('no-scroll');
+      const scrollY = window.scrollY;
+      document.body.style.position = 'fixed';
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.left = '0';
+      document.body.style.right = '0';
+      return () => {
+        document.body.style.position = '';
+        document.body.style.top = '';
+        document.body.style.left = '';
+        document.body.style.right = '';
+        window.scrollTo(0, scrollY);
+      };
     }
-    return () => {
-      document.body.classList.remove('no-scroll');
-    };
   }, [sidebarOpen]);
 
   return (

@@ -98,7 +98,4 @@ aside[aria-label="Mobile navigation"] {
   transform: translateZ(0);
 }
 
-/* Body scroll-lock class toggled by Navbar — avoids style mutation reflow */
-body.no-scroll {
-  overflow: hidden;
-}
+
