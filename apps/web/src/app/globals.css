@@ -95,7 +95,6 @@ input[type="range"] {
 aside[aria-label="Mobile navigation"] {
   /* The sidebar slides off-screen; promoting to layer avoids CLS */
   will-change: transform;
-  transform: translateZ(0);
 }
 
 
