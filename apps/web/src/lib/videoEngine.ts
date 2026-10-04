@@ -1,23 +1,37 @@
 /**
  * Browser-Native Video Processing Engine for Local AI Shorts Studio.
- * Uses WebCodecs, mp4-muxer, OffscreenCanvas, and hardware-accelerated encoding.
+ * Uses WebCodecs, mediabunny (sequential demux/decode), mp4-muxer,
+ * OffscreenCanvas, and hardware-accelerated H.264 encoding.
  * Runs 100% on the client device. Zero server uploads.
  *
- * ULTRA-FAST RENDERING OPTIMIZATIONS:
- *  - Adaptive FPS & Bitrate per device tier (24/30 FPS on low-end, 60 FPS on high-end).
- *  - Pre-warmed multi-profile H.264 hardware encoder negotiation (High -> Main -> Baseline).
- *  - OffscreenCanvas with desynchronized=true and alpha=false for direct GPU rendering.
- *  - Cached vignette radial gradient across all frames (never reallocated).
- *  - Subtitle binary search O(log n) per frame instead of linear scans.
- *  - Dedicated seek with timeout safety guard, audio pre-muted to bypass media pipeline stalls.
- *  - GPU backpressure flow control (encodeQueueSize monitoring) to maximize throughput.
- *  - Synchronized stereo AAC audio encoding directly multiplexed with zero drift.
- *  - Direct-to-disk streaming option via File System Access API for zero-memory footprint.
- *  - MOBILE PERF: AudioBuffer cached across all shorts — full-file decode runs once per video.
- *  - MOBILE PERF: Pre-allocated audio interleave buffer — no per-chunk GC allocation in hot-loop.
- *  - MOBILE PERF: requestVideoFrameCallback-based seek on Chrome/Android for faster frame seeks.
- *  - MOBILE PERF: VideoEncoder.isConfigSupported() results cached per session (skips GPU IPC).
- *  - MOBILE PERF: Tuned encoder backpressure threshold to keep hardware encoder fully saturated.
+ * PERFORMANCE ARCHITECTURE:
+ *  PRIMARY PATH (when source is a File/Blob):
+ *    mediabunny demux -> sequential VideoSampleSink.samples() -> VideoFrame
+ *    -> canvas compositing -> VideoEncoder -> mp4-muxer
+ *    ELIMINATES all per-frame random HTMLVideoElement seeks.
+ *    Source FPS read from demuxer (accurate, not hardcoded 30).
+ *
+ *  FALLBACK PATH (when mediabunny decode unavailable or sourceFile absent):
+ *    HTMLVideoElement seeked event (desktop regression fixed — no RVFC chain).
+ *
+ * KEY FIXES vs previous commit (68bde2e):
+ *  1. DESKTOP REGRESSION: Removed seeked->RVFC chain. Desktop uses seeked event
+ *     ONLY. RVFC is used on mobile INSTEAD OF (not after) the seeked event.
+ *  2. ENCODER CONFIG: Validated (codec, hardwareAcceleration) pair is now used
+ *     exactly in VideoEncoder.configure() — no silent 'prefer-hardware' override.
+ *  3. SEQUENTIAL DECODE: mediabunny eliminates N random seeks for N frames.
+ *     30s @ 60fps = 1800 seeks eliminated on the primary path.
+ *  4. SOURCE FPS: Read from demuxer metadata, not hardcoded to 30.
+ *
+ * Preserved optimizations:
+ *  - AudioBuffer cached across all shorts per video source.
+ *  - Pre-allocated Float32Array interleave buffer in audio hot-loop.
+ *  - VideoEncoder.isConfigSupported() results cached per session.
+ *  - Cached vignette radial gradient (never reallocated per frame).
+ *  - Subtitle binary search O(log n) per frame.
+ *  - OffscreenCanvas with desynchronized=true and alpha=false.
+ *  - Dynamic backpressure threshold per device type.
+ *  - Progress updates throttled to avoid React reconciliation overhead.
  */
 
 import { Muxer, ArrayBufferTarget, FileSystemWritableFileStreamTarget } from 'mp4-muxer';
@@ -162,9 +176,11 @@ function getCachedVignette(
 // Core frame painter (shared by preview loop and render pipeline)
 // ---------------------------------------------------------------------------
 
+// renderFrameToCanvas accepts HTMLVideoElement (seek fallback path) OR
+// ImageBitmap/VideoFrame (sequential decode path) as the image source.
 export function renderFrameToCanvas(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  video: HTMLVideoElement,
+  video: HTMLVideoElement | ImageBitmap | VideoFrame,
   targetWidth: number,
   targetHeight: number,
   strategy: ReframeStrategy,
@@ -176,21 +192,26 @@ export function renderFrameToCanvas(
   hook?: GeneratedHook
 ) {
   const timeProgress = currentTime - clipStartTime;
+  // Determine source dimensions from whatever image source we have.
+  const srcW: number = (video as HTMLVideoElement).videoWidth
+    ?? (video as any).width ?? 0;
+  const srcH: number = (video as HTMLVideoElement).videoHeight
+    ?? (video as any).height ?? 0;
 
   if (strategy === 'Fit + Blur') {
     ctx.save();
     ctx.filter = 'blur(30px) brightness(0.65)';
-    ctx.drawImage(video, -40, -40, targetWidth + 80, targetHeight + 80);
+    ctx.drawImage(video as CanvasImageSource, -40, -40, targetWidth + 80, targetHeight + 80);
     ctx.restore();
 
-    const videoAspect = video.videoWidth / video.videoHeight;
+    const videoAspect = srcW / srcH;
     let drawW = targetWidth;
     let drawH = targetWidth / videoAspect;
     if (drawH > targetHeight) { drawH = targetHeight; drawW = targetHeight * videoAspect; }
-    ctx.drawImage(video, (targetWidth - drawW) / 2, (targetHeight - drawH) / 2, drawW, drawH);
+    ctx.drawImage(video as CanvasImageSource, (targetWidth - drawW) / 2, (targetHeight - drawH) / 2, drawW, drawH);
   } else {
     const { cropX, cropY, cropWidth, cropHeight } = calculateReframeCrop(
-      video.videoWidth, video.videoHeight, targetWidth, targetHeight, strategy, timeProgress
+      srcW, srcH, targetWidth, targetHeight, strategy, timeProgress
     );
 
     let scaleEffect = 1.0, shakeX = 0, shakeY = 0;
@@ -217,7 +238,7 @@ export function renderFrameToCanvas(
     } else if (editingStyle === 'Balanced') {
       ctx.filter = 'contrast(103%) saturate(104%)';
     }
-    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
+    ctx.drawImage(video as CanvasImageSource, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
     ctx.restore();
   }
 
@@ -286,12 +307,29 @@ function getAdaptiveSettings(
 
 // ---------------------------------------------------------------------------
 // Utility: seek with safeguard timeout
-// Uses requestVideoFrameCallback on supported browsers (Chrome, Chrome Android)
-// for faster, frame-accurate seek notification instead of polling seeked events.
-// Falls back to seeked event with timeout on Safari / Firefox / older browsers.
+//
+// DESKTOP REGRESSION FIX (commit 68bde2e introduced the regression):
+// The previous implementation chained: seeked event -> requestVideoFrameCallback
+// This DOUBLED the async round-trips per frame on desktop.
+// On desktop Chrome/Edge, the 'seeked' event fires AFTER the frame is decoded
+// and drawImage() returns the correct frame immediately — RVFC adds zero value
+// there and only adds latency (~4-16ms per frame = 7-29s extra for 1800 frames).
+//
+// CORRECTED behavior:
+//  Desktop / Firefox / Safari: resolve on 'seeked' event ONLY (fastest path).
+//  Mobile Chrome (RVFC supported + _isMobile): use RVFC as SOLE signal.
+//    On Android, 'seeked' can fire before the pixel data is ready for drawImage(),
+//    causing blank frames. RVFC fires after the frame is truly available.
+//    We use RVFC INSTEAD OF seeked (not chained after it).
+//
+// NOTE: When using the PRIMARY sequential mediabunny decode path, seekVideoTo()
+// is NOT called during the frame loop at all — only used in the FALLBACK path.
 // ---------------------------------------------------------------------------
 
-// Detect once at module level — avoids repeated prototype lookups per frame
+// Detect once at module level.
+const _isMobile = typeof navigator !== 'undefined'
+  && /Android|Mobile/i.test(navigator.userAgent);
+
 const _rvfcSupported =
   typeof HTMLVideoElement !== 'undefined' &&
   typeof (HTMLVideoElement.prototype as any).requestVideoFrameCallback === 'function';
@@ -303,41 +341,36 @@ function seekVideoTo(video: HTMLVideoElement, time: number): Promise<void> {
       return;
     }
 
-    if (_rvfcSupported) {
-      // requestVideoFrameCallback fires once the browser has decoded and
-      // presented the frame at the seeked position — significantly faster on
-      // mobile Chrome/Android than waiting for the 'seeked' DOM event, which
-      // may fire before the frame is ready for drawImage().
+    // Mobile Chrome: use RVFC as the SOLE signal (replaces seeked event entirely).
+    // RVFC fires after the decoded frame is ready for drawImage().
+    if (_rvfcSupported && _isMobile) {
       let rVfcHandle: number;
       const timer = setTimeout(() => {
         try { (video as any).cancelVideoFrameCallback(rVfcHandle); } catch { /* noop */ }
         resolve(); // safety timeout
-      }, 1500);
-
-      video.addEventListener('seeked', () => {
-        rVfcHandle = (video as any).requestVideoFrameCallback(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-      }, { once: true });
-
+      }, 2000);
       video.currentTime = time;
-    } else {
-      // Fallback: standard seeked event with timeout (Safari, Firefox, older)
-      const handler = () => {
+      rVfcHandle = (video as any).requestVideoFrameCallback(() => {
         clearTimeout(timer);
-        video.removeEventListener('seeked', handler);
         resolve();
-      };
-
-      const timer = setTimeout(() => {
-        video.removeEventListener('seeked', handler);
-        resolve(); // safeguard: never stall indefinitely
-      }, 2500);
-
-      video.addEventListener('seeked', handler);
-      video.currentTime = time;
+      });
+      return;
     }
+
+    // Desktop and non-RVFC browsers: seeked event ONLY.
+    // On desktop Chrome/Edge the 'seeked' event fires after frame decode;
+    // drawImage() immediately returns the correct pixel data.
+    const handler = () => {
+      clearTimeout(timer);
+      video.removeEventListener('seeked', handler);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      video.removeEventListener('seeked', handler);
+      resolve(); // safeguard: never stall indefinitely
+    }, 2000);
+    video.addEventListener('seeked', handler);
+    video.currentTime = time;
   });
 }
 
@@ -406,42 +439,65 @@ export function clearAudioCache(): void {
 }
 
 // ---------------------------------------------------------------------------
-// MOBILE OPTIMIZATION: VideoEncoder.isConfigSupported() result cache.
+// VideoEncoder.isConfigSupported() result cache.
 //
 // isConfigSupported() is an async IPC call to the GPU process. On mobile it
-// can take 50-200ms per call. The profile cascade makes up to 3 calls per
+// can take 50-200ms per call. The profile cascade makes up to 4 calls per
 // short. Caching by (codec|w|h|bitrate|fps|hw) eliminates the repeated
 // round-trips for every subsequent short with the same configuration.
+//
+// ENCODER CONFIG FIX: selectEncoderConfig() now returns a SelectedEncoderConfig
+// struct capturing BOTH the validated codec AND the exact hardwareAcceleration
+// value. The caller uses this exact struct in VideoEncoder.configure() —
+// no more silent override to 'prefer-hardware' regardless of what was tested.
 // ---------------------------------------------------------------------------
 
-const _encoderConfigCache = new Map<string, boolean>();
+interface SelectedEncoderConfig {
+  codec: string;
+  hardwareAcceleration: HardwareAcceleration;
+}
 
-async function isEncoderConfigSupported(
-  codec: string,
+const _encoderConfigCache = new Map<string, SelectedEncoderConfig | null>();
+
+async function selectEncoderConfig(
   width: number,
   height: number,
   bitrate: number,
-  framerate: number,
-  hardwareAcceleration: string
-): Promise<boolean> {
-  const key = `${codec}|${width}|${height}|${bitrate}|${framerate}|${hardwareAcceleration}`;
-  if (_encoderConfigCache.has(key)) return _encoderConfigCache.get(key)!;
-  try {
-    const result = await VideoEncoder.isConfigSupported({
-      codec,
-      width,
-      height,
-      bitrate,
-      framerate,
-      hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
-    });
-    const supported = result.supported ?? false;
-    _encoderConfigCache.set(key, supported);
-    return supported;
-  } catch {
-    _encoderConfigCache.set(key, false);
-    return false;
+  framerate: number
+): Promise<SelectedEncoderConfig> {
+  // Profile cascade: High L5.1 -> Main L4.0 -> Baseline L3.0
+  // 'prefer-hardware' first — mobile hardware encoders support Main Profile best.
+  const candidates: SelectedEncoderConfig[] = [
+    { codec: 'avc1.640033', hardwareAcceleration: 'prefer-hardware' },
+    { codec: 'avc1.4d4028', hardwareAcceleration: 'prefer-hardware' },
+    { codec: 'avc1.42e01e', hardwareAcceleration: 'prefer-hardware' },
+    { codec: 'avc1.42e01e', hardwareAcceleration: 'no-preference' },
+  ];
+  for (const candidate of candidates) {
+    const key = `${candidate.codec}|${width}|${height}|${bitrate}|${framerate}|${candidate.hardwareAcceleration}`;
+    if (_encoderConfigCache.has(key)) {
+      const cached = _encoderConfigCache.get(key);
+      if (cached) return cached;
+      continue; // null = previously tested and failed
+    }
+    try {
+      const result = await VideoEncoder.isConfigSupported({
+        codec: candidate.codec,
+        width,
+        height,
+        bitrate,
+        framerate,
+        hardwareAcceleration: candidate.hardwareAcceleration,
+      });
+      const supported = result.supported ?? false;
+      _encoderConfigCache.set(key, supported ? candidate : null);
+      if (supported) return candidate;
+    } catch {
+      _encoderConfigCache.set(key, null);
+    }
   }
+  // Absolute fallback
+  return { codec: 'avc1.42e01e', hardwareAcceleration: 'no-preference' };
 }
 
 // ---------------------------------------------------------------------------
@@ -526,31 +582,186 @@ async function encodeAudioFromBuffer(
 }
 
 // ---------------------------------------------------------------------------
+// Sequential frame decode pipeline using mediabunny.
+//
+// Replaces per-frame random HTMLVideoElement seeks with:
+//   mediabunny BlobSource -> Input -> VideoSampleSink.samples() iterator
+//   Each VideoSample wraps a VideoFrame ready for drawImage().
+//
+// For [startTime, endTime]:
+//  1. mediabunny demuxes the source Blob/File once
+//  2. samples(startTime, endTime) decodes sequentially from preceding keyframe
+//  3. Each VideoSample is a VideoFrame ready for drawImage() — zero seeks
+//
+// Source FPS from demuxer FrameRateMetrics (accurate: 24/25/30/50/60 etc).
+// Output FPS > source FPS: each source frame rendered N times (no extra seeks).
+// ---------------------------------------------------------------------------
+
+async function trySequentialDecode(
+  sourceFile: File | Blob,
+  startTime: number,
+  endTime: number,
+  targetWidth: number,
+  targetHeight: number,
+  fps: number,
+  frameDurationUs: number,
+  totalFrames: number,
+  stepSeconds: number,
+  canvas: OffscreenCanvas | HTMLCanvasElement,
+  ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
+  videoEncoder: VideoEncoder,
+  keyframeInterval: number,
+  reframeStrategy: ReframeStrategy,
+  editingStyle: EditingStyle,
+  clipStartTime: number,
+  subtitles: SubtitleCue[] | undefined,
+  subtitleTheme: SubtitleTheme | undefined,
+  hook: GeneratedHook | undefined,
+  onProgress: (pct: number, stage: string) => void
+): Promise<{ success: boolean }> {
+  // Dynamic import avoids SSR issues and keeps mediabunny tree-shaken
+  // when not needed (e.g. fallback-only builds).
+  let mb: any;
+  try {
+    mb = await import('mediabunny');
+  } catch {
+    return { success: false };
+  }
+
+  const { Input, Mp4InputFormat, QuickTimeInputFormat, WebMInputFormat,
+          MatroskaInputFormat, BlobSource, VideoSampleSink } = mb;
+
+  const formats = [Mp4InputFormat, QuickTimeInputFormat, WebMInputFormat, MatroskaInputFormat]
+    .filter(Boolean);
+  if (!formats.length) return { success: false };
+
+  let input: any = null;
+  try {
+    input = new Input({ formats, source: new BlobSource(sourceFile) });
+
+    const tracks: any[] = await input.getTracks?.() ?? [];
+    const videoTrack = tracks.find(
+      (t: any) => t.type === 'video' ||
+        (mb.InputVideoTrack && t instanceof mb.InputVideoTrack)
+    );
+    if (!videoTrack) return { success: false };
+
+    const canDecode = await videoTrack.canDecode?.();
+    if (!canDecode) return { success: false };
+
+    // Read actual source FPS accurately from demuxer metadata.
+    let sourceFps = 30;
+    try {
+      const metrics = await videoTrack.getFrameRateMetrics?.({ targetPacketCount: 64 });
+      if (metrics?.bestGuessFrameRate > 0) sourceFps = metrics.bestGuessFrameRate;
+    } catch { /* non-fatal, fallback to 30 */ }
+
+    const sink = new VideoSampleSink(videoTrack, { hardwareAcceleration: 'prefer-hardware' });
+
+    // How many output frames does each source frame cover?
+    // 30fps src -> 60fps output: ratio=2 (each source frame rendered twice)
+    // 60fps src -> 60fps output: ratio=1
+    // 60fps src -> 30fps output: ratio=1 (mediabunny iterator skips extra frames)
+    const ratio = Math.max(1, Math.round(fps / sourceFps));
+
+    let fi = 0;
+    let encoderError: Error | null = null;
+    let lastSample: any = null;
+
+    // samples() returns an async iterator decoding sequentially from the
+    // keyframe at/before startTime — zero per-frame seeks.
+    for await (const sample of sink.samples(startTime, endTime)) {
+      if (encoderError) throw encoderError;
+      if (!sample) continue;
+      lastSample = sample;
+
+      for (let rep = 0; rep < ratio && fi < totalFrames; rep++) {
+        const sec = clipStartTime + fi * stepSeconds;
+        renderFrameToCanvas(
+          ctx,
+          sample as unknown as ImageBitmap,
+          targetWidth, targetHeight,
+          reframeStrategy, editingStyle,
+          sec, clipStartTime,
+          subtitles, subtitleTheme, hook
+        );
+        const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+          timestamp: fi * frameDurationUs,
+          duration: frameDurationUs,
+        });
+        videoEncoder.encode(vf, { keyFrame: fi % keyframeInterval === 0 });
+        vf.close();
+
+        // Dynamic backpressure: desktop encoder drains fast (allow larger queue),
+        // mobile encoder is slower (keep queue smaller to avoid OOM).
+        const bpThreshold = _isMobile ? 6 : 12;
+        if (videoEncoder.encodeQueueSize > bpThreshold) {
+          await new Promise((r) => setTimeout(r, 0));
+        }
+
+        // Throttle React progress updates (~fps/5 per second = ~12 updates/s at 60fps)
+        if (fi % Math.max(5, Math.floor(fps / 5)) === 0 || fi === totalFrames - 1) {
+          const pct = Math.round(5 + (fi / totalFrames) * 85);
+          onProgress(pct, `Processing frame ${fi + 1}/${totalFrames} @ ${fps} FPS`);
+        }
+        fi++;
+      }
+      sample.close?.();
+      if (fi >= totalFrames) break;
+    }
+
+    // Fill any remaining frames using last decoded sample (boundary handling).
+    while (lastSample && fi < totalFrames) {
+      if (encoderError) throw encoderError;
+      const sec = clipStartTime + fi * stepSeconds;
+      renderFrameToCanvas(
+        ctx,
+        lastSample as unknown as ImageBitmap,
+        targetWidth, targetHeight,
+        reframeStrategy, editingStyle,
+        sec, clipStartTime,
+        subtitles, subtitleTheme, hook
+      );
+      const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+        timestamp: fi * frameDurationUs, duration: frameDurationUs,
+      });
+      videoEncoder.encode(vf, { keyFrame: false });
+      vf.close();
+      fi++;
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.warn('[VideoEngine] Sequential decode failed, using seek fallback:', err);
+    return { success: false };
+  } finally {
+    try { input?.[Symbol.dispose]?.(); } catch { /* noop */ }
+    try { await input?.dispose?.(); } catch { /* noop */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
 /**
- * Ultra-Fast WebCodecs + mp4-muxer Rendering Pipeline.
+ * High-Performance WebCodecs + mp4-muxer Rendering Pipeline.
  *
- * Optimizations applied:
- *  - Adaptive FPS & bitrate per device tier (24/30 FPS on low-end, 60 FPS on high-end).
- *  - Hardware H.264 profile negotiation (High -> Main -> Baseline).
- *  - OffscreenCanvas with desynchronized GPU pipeline.
- *  - Cached radial gradients & binary search subtitles.
- *  - Zero redundant clearRect memory passes.
- *  - Encoder backpressure flow control to avoid GPU stalls.
- *  - Synchronized stereo AAC audio multiplexing.
- */
-/**
- * Ultra-Fast WebCodecs + mp4-muxer Rendering Pipeline.
+ * PRIMARY: mediabunny sequential demux/decode -> canvas -> VideoEncoder
+ *   - Zero random HTMLVideoElement seeks (eliminates dominant bottleneck)
+ *   - Source FPS accurately read from demuxer
+ *   - 30fps source -> 60fps output: frame duplication (no double seeks)
  *
- * Mobile optimizations added:
- *  - AudioBuffer decoded once per video source, reused for all shorts.
- *  - Eliminated redundant arrayBuffer.slice(0) copy before decodeAudioData.
- *  - Pre-allocated audio interleave Float32Array — no per-chunk GC in hot-loop.
- *  - requestVideoFrameCallback seek on Chrome/Android for frame-accurate seeks.
- *  - VideoEncoder.isConfigSupported() results cached — no per-short GPU IPC.
- *  - Backpressure threshold raised 4→8 to saturate encoder on seek-heavy mobile.
+ * FALLBACK: HTMLVideoElement seeks
+ *   - Desktop: seeked event only (DESKTOP REGRESSION FIXED — no extra RVFC)
+ *   - Mobile: RVFC only (avoids blank-frame race on Android)
+ *
+ * All other optimizations preserved:
+ *   - AudioBuffer decoded once per source, reused for all shorts
+ *   - Pre-allocated audio interleave Float32Array
+ *   - Encoder config (codec + hardwareAcceleration) used exactly as validated
+ *   - Dynamic backpressure per device type
+ *   - Progress updates throttled to avoid React reconciliation overhead
  */
 export async function renderShortToMp4(options: RenderOptions): Promise<RenderResult> {
   const {
@@ -585,13 +796,9 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
   const stepSeconds = 1 / fps;
   const totalFrames = Math.ceil(duration * fps);
 
-  prog(1, `⚡ Initializing lightning-fast render @ ${fps} FPS (${totalFrames} frames)...`);
+  prog(1, `Initializing render @ ${fps} FPS (${totalFrames} frames)...`);
 
   // 2. Prepare audio track — use cached AudioBuffer if available for this file.
-  //    MOBILE OPTIMIZATION: previously this re-read and re-decoded the entire source
-  //    file for every short. Now decode runs once and the AudioBuffer is reused for
-  //    all subsequent shorts from the same video, eliminating the dominant mobile
-  //    bottleneck in multi-short batch rendering (N × full-file-read + decode).
   let audioBuffer: AudioBuffer | null = null;
   let targetAudioSampleRate = 48000;
   let targetAudioChannels = 2;
@@ -607,14 +814,12 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     );
 
     if (_audioCacheEntry && _audioCacheEntry.key === cacheKey) {
-      // Cache hit: reuse previously decoded AudioBuffer (zero re-read, zero re-decode)
       audioBuffer = _audioCacheEntry.audioBuffer;
       targetAudioSampleRate = _audioCacheEntry.sampleRate;
       targetAudioChannels = _audioCacheEntry.channels;
       audioEncoderSupported = _audioCacheEntry.audioEncoderSupported;
       hasAudio = true;
     } else {
-      // Cache miss: decode for the first time and store in cache
       let arrayBuffer: ArrayBuffer | null = null;
       if (sourceFile) {
         arrayBuffer = await (sourceFile as Blob).arrayBuffer();
@@ -628,8 +833,6 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
         if (ACtx) {
           const actx = new ACtx();
           try {
-            // MOBILE OPTIMIZATION: pass arrayBuffer directly (no slice(0) copy) —
-            // decodeAudioData detaches the buffer, but we don't need it afterwards.
             audioBuffer = await actx.decodeAudioData(arrayBuffer);
             if (audioBuffer && audioBuffer.duration > 0 && audioBuffer.numberOfChannels > 0) {
               targetAudioSampleRate = audioBuffer.sampleRate;
@@ -654,8 +857,6 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
         } catch {
           audioEncoderSupported = false;
         }
-
-        // Persist for subsequent shorts rendered with the same source file
         _audioCacheEntry = {
           key: cacheKey,
           audioBuffer,
@@ -669,7 +870,7 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     console.warn('[VideoEngine] Audio decode skipped:', err);
   }
 
-  // 3. Set up MP4 Muxer (with direct disk streaming or in-memory target)
+  // 3. Set up MP4 Muxer
   let muxerTarget: ArrayBufferTarget | FileSystemWritableFileStreamTarget;
   let fileStream: any = null;
   if (fileHandle) {
@@ -681,19 +882,9 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
 
   const muxer = new Muxer({
     target: muxerTarget,
-    video: {
-      codec: 'avc',
-      width: targetWidth,
-      height: targetHeight,
-    },
+    video: { codec: 'avc', width: targetWidth, height: targetHeight },
     ...(audioEncoderSupported
-      ? {
-          audio: {
-            codec: 'aac',
-            numberOfChannels: targetAudioChannels,
-            sampleRate: targetAudioSampleRate,
-          },
-        }
+      ? { audio: { codec: 'aac', numberOfChannels: targetAudioChannels, sampleRate: targetAudioSampleRate } }
       : {}),
     fastStart: 'in-memory',
     firstTimestampBehavior: 'offset',
@@ -716,104 +907,104 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     },
   });
 
-  // Profile cascade: High L5.1 -> Main L4.0 -> Baseline L3.0
-  // MOBILE OPTIMIZATION: isConfigSupported() results cached — avoids repeated
-  // async GPU IPC round-trips (50-200ms each on mobile) for every short.
-  const codecs = [
-    { codec: 'avc1.640033', hw: 'prefer-hardware' },
-    { codec: 'avc1.4d4028', hw: 'prefer-hardware' },
-    { codec: 'avc1.42e01e', hw: 'no-preference' },
-  ];
-  let chosenCodec = codecs[0].codec;
-  for (const c of codecs) {
-    const supported = await isEncoderConfigSupported(c.codec, targetWidth, targetHeight, br, fps, c.hw);
-    if (supported) {
-      chosenCodec = c.codec;
-      break;
-    }
-  }
+  // ENCODER CONFIG FIX: selectEncoderConfig() returns the EXACT (codec, hardwareAcceleration)
+  // pair that was validated. We use it exactly in configure() — no silent override.
+  const selectedConfig = await selectEncoderConfig(targetWidth, targetHeight, br, fps);
 
   videoEncoder.configure({
-    codec: chosenCodec,
+    codec: selectedConfig.codec,
     width: targetWidth,
     height: targetHeight,
     bitrate: br,
     framerate: fps,
-    hardwareAcceleration: 'prefer-hardware',
+    hardwareAcceleration: selectedConfig.hardwareAcceleration,
   });
 
   // 5. Create render canvas
   const { canvas, ctx } = createRenderCanvas(targetWidth, targetHeight);
   if (!ctx) throw new Error('Render canvas context could not be created.');
 
-  // 6. Fast frame-by-frame extraction loop
-  // Muting & pausing video element prevents DOM presentation & audio decoding overhead during seeks
-  const prevMuted = sourceVideo.muted;
-  const prevPaused = sourceVideo.paused;
-  sourceVideo.muted = true;
-  sourceVideo.pause();
+  prog(5, `Rendering ${totalFrames} frames (${selectedConfig.codec})...`);
 
-  prog(5, `⚡ Rendering ${totalFrames} frames with hardware acceleration (${chosenCodec})...`);
+  // 6. PRIMARY: Try sequential mediabunny decode (zero per-frame seeks)
+  let usedPipeline = `sequential-${selectedConfig.codec}`;
+  let sequentialSuccess = false;
 
-  try {
-    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
-      if (encoderError) throw encoderError;
+  if (sourceFile) {
+    const result = await trySequentialDecode(
+      sourceFile, startTime, endTime,
+      targetWidth, targetHeight,
+      fps, frameDurationUs, totalFrames, stepSeconds,
+      canvas, ctx, videoEncoder, keyframeInterval,
+      reframeStrategy, editingStyle, startTime,
+      subtitles, subtitleTheme, hook, prog
+    );
+    sequentialSuccess = result.success;
+  }
 
-      const currentSec = startTime + frameIndex * stepSeconds;
+  // 7. FALLBACK: HTMLVideoElement seek-based pipeline
+  //    Desktop: seeked event only (REGRESSION FIX — no extra RVFC round-trip)
+  //    Mobile:  RVFC only (avoids blank-frame race on Android)
+  if (!sequentialSuccess) {
+    usedPipeline = `seek-fallback-${selectedConfig.codec}`;
 
-      // Exact timestamp seek
-      await seekVideoTo(sourceVideo, currentSec);
+    const prevMuted = sourceVideo.muted;
+    const prevPaused = sourceVideo.paused;
+    sourceVideo.muted = true;
+    sourceVideo.pause();
 
-      // Render video + overlays (vignette, kinetic subtitles, hook banner, effects)
-      renderFrameToCanvas(
-        ctx,
-        sourceVideo,
-        targetWidth,
-        targetHeight,
-        reframeStrategy,
-        editingStyle,
-        currentSec,
-        startTime,
-        subtitles,
-        subtitleTheme,
-        hook
-      );
+    try {
+      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+        if (encoderError) throw encoderError;
 
-      // Create & encode VideoFrame
-      const timestampUs = frameIndex * frameDurationUs;
-      const vf = new VideoFrame(canvas as HTMLCanvasElement, {
-        timestamp: timestampUs,
-        duration: frameDurationUs,
-      });
+        const currentSec = startTime + frameIndex * stepSeconds;
+        await seekVideoTo(sourceVideo, currentSec);
 
-      const isKeyFrame = frameIndex % keyframeInterval === 0;
-      videoEncoder.encode(vf, { keyFrame: isKeyFrame });
-      vf.close();
+        renderFrameToCanvas(
+          ctx,
+          sourceVideo,
+          targetWidth,
+          targetHeight,
+          reframeStrategy,
+          editingStyle,
+          currentSec,
+          startTime,
+          subtitles,
+          subtitleTheme,
+          hook
+        );
 
-      // GPU backpressure flow control: keep hardware encoder saturated without memory overload.
-      // MOBILE OPTIMIZATION: threshold raised 4→8. On mobile, seeks dominate frame time so
-      // the encoder never builds a queue of 4. The old threshold caused unnecessary
-      // setTimeout yields that serialized the seek→encode pipeline. 8 frames (~16 MB peak)
-      // keeps the hardware encoder pipeline full without excessive memory pressure.
-      if (videoEncoder.encodeQueueSize > 8) {
-        await new Promise((r) => setTimeout(r, 0));
+        const timestampUs = frameIndex * frameDurationUs;
+        const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+          timestamp: timestampUs,
+          duration: frameDurationUs,
+        });
+
+        const isKeyFrame = frameIndex % keyframeInterval === 0;
+        videoEncoder.encode(vf, { keyFrame: isKeyFrame });
+        vf.close();
+
+        // Dynamic backpressure tuned per device type
+        const bpThreshold = _isMobile ? 4 : 8;
+        if (videoEncoder.encodeQueueSize > bpThreshold) {
+          await new Promise((r) => setTimeout(r, 0));
+        }
+
+        // Throttle progress updates to ~fps/5 cadence to reduce React overhead
+        if (frameIndex % Math.max(5, Math.floor(fps / 5)) === 0 || frameIndex === totalFrames - 1) {
+          const pct = Math.round(5 + (frameIndex / totalFrames) * 85);
+          prog(pct, `Processing frame ${frameIndex + 1}/${totalFrames} @ ${fps} FPS`);
+        }
       }
-
-      // Update progress every few frames
-      if (frameIndex % Math.max(5, Math.floor(fps / 4)) === 0 || frameIndex === totalFrames - 1) {
-        const pct = Math.round(5 + (frameIndex / totalFrames) * 85);
-        prog(pct, `⚡ Processing frame ${frameIndex + 1}/${totalFrames} @ ${fps} FPS`);
-      }
+    } finally {
+      sourceVideo.muted = prevMuted;
+      if (!prevPaused) sourceVideo.play().catch(() => {});
     }
-  } finally {
-    // Restore video state
-    sourceVideo.muted = prevMuted;
-    if (!prevPaused) sourceVideo.play().catch(() => {});
   }
 
   if (encoderError) throw encoderError;
 
-  // 7. Encode synchronized stereo AAC audio
+  // 8. Encode synchronized stereo AAC audio
   if (audioEncoderSupported && audioBuffer) {
     prog(92, '⚡ Encoding synchronized AAC stereo audio...');
     try {
@@ -830,8 +1021,8 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     }
   }
 
-  // 8. Finalize VideoEncoder & MP4 container
-  prog(96, '⚡ Finalizing ultra-fast MP4 container...');
+  // 9. Finalize VideoEncoder & MP4 container
+  prog(96, '⚡ Finalizing MP4 container...');
   await videoEncoder.flush();
   videoEncoder.close();
   muxer.finalize();
@@ -846,7 +1037,7 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
       fps,
       fileSizeBytes: 0,
       streamedToDisk: true,
-      pipeline: `hardware-${chosenCodec}`,
+      pipeline: usedPipeline,
     };
   }
 
@@ -862,6 +1053,6 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     fps,
     fileSizeBytes: blob.size,
     streamedToDisk: false,
-    pipeline: `hardware-${chosenCodec}`,
+    pipeline: usedPipeline,
   };
 }
