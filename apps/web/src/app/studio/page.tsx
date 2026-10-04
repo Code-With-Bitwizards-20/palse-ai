@@ -127,6 +127,9 @@ export default function StudioPage() {
 
   // Global rendering state
   const [isBatchRendering, setIsBatchRendering] = useState(false);
+  // Ref for synchronous export-lock check inside preview loop and render callbacks.
+  // React state updates are async; a ref gives immediate, synchronous correctness.
+  const isBatchRenderingRef = useRef(false);
 
   // Inline filename renaming state
   const [editingFilenameIdx, setEditingFilenameIdx] = useState<number | null>(null);
@@ -216,11 +219,15 @@ export default function StudioPage() {
   }, [videoDuration, clipDuration, remainderStrategy, resolutionTier]);
 
   // 5. Realtime Interactive Preview Canvas Loop
+  //    FIX: Use isBatchRenderingRef (synchronous ref) rather than deriving
+  //    isExporting from stale React state. Avoids race where preview loop
+  //    resumes and seeks sourceVideo mid-batch transition.
   useEffect(() => {
     let animId: number;
 
     const renderLoop = () => {
-      const isExporting = shorts.some((s) => s.status === 'rendering');
+      // Use the ref for synchronous, lag-free batch-lock check
+      const isExporting = isBatchRenderingRef.current || shorts.some((s) => s.status === 'rendering');
       const video = videoRef.current;
       const canvas = previewCanvasRef.current;
       if (!isExporting && video && canvas && video.readyState >= 2) {
@@ -315,13 +322,16 @@ export default function StudioPage() {
     }
   }, [resolutionTier]);
 
-  // 6. Render Single Short (with optional File System Access streaming)
-  const handleRenderShort = async (shortIndex: number) => {
+  // 6. Render Single Short
+  // isBatchMode=true disables per-short confirm() dialogs and file pickers
+  // (all user decisions must be collected BEFORE the batch starts, not inside it).
+  const handleRenderShort = async (shortIndex: number, isBatchMode = false) => {
     const short = shorts[shortIndex];
     if (!short || !videoRef.current) return;
 
-    // Check 4K warning
-    if (resolutionTier === '4k' && deviceCaps && !deviceCaps.encode4k60.supported) {
+    // 4K capability warning — shown only for single-short renders, never during batch.
+    // During batch, the caller must have already confirmed before starting the loop.
+    if (!isBatchMode && resolutionTier === '4k' && deviceCaps && !deviceCaps.encode4k60.supported) {
       const proceed = confirm(
         '4K rendering may exceed this device\'s browser/GPU capability. 1080p is recommended. Do you wish to continue anyway?'
       );
@@ -334,15 +344,19 @@ export default function StudioPage() {
       )
     );
 
+    // File System Access picker — only available for SINGLE-short renders.
+    // During Render All (isBatchMode=true), we NEVER call showSaveFilePicker() per short.
+    // That would (a) require user activation for each short, and (b) be suppressed
+    // by the browser when the tab is backgrounded, causing: "confirm() was suppressed".
     let fileHandle: FileSystemFileHandle | undefined = undefined;
-    if (typeof window !== 'undefined' && (window as any).showSaveFilePicker) {
+    if (!isBatchMode && typeof window !== 'undefined' && (window as any).showSaveFilePicker) {
       try {
         const useStreaming = confirm(
           `Stream "${short.filename}" directly to your disk to save browser memory? (Recommended for large files)`
         );
         if (useStreaming) {
           fileHandle = await (window as any).showSaveFilePicker({
-            suggestedName: short.filename, // uses whatever name user set
+            suggestedName: short.filename,
             types: [
               {
                 description: 'MP4 Video',
@@ -426,13 +440,52 @@ export default function StudioPage() {
   };
 
   // 7. Sequential Batch Render All
+  //
+  // FIX: Stale closure bug — the shorts array captured by the closure at the
+  // time handleRenderAll was called would be stale after each await (each short
+  // render calls setShorts() multiple times internally). Reading shorts[i].status
+  // from the stale closure would always see the INITIAL status snapshot.
+  //
+  // Fix: take an immutable snapshot of clip definitions upfront (index, startTime,
+  // endTime, etc.), then let handleRenderShort read live state via setShorts
+  // functional updates. We only need the snapshot to know WHICH shorts to render
+  // and their initial status — not the status mid-batch.
+  //
+  // FIX: Removes confirm()/showSaveFilePicker() during batch by passing isBatchMode=true.
+  // All user decisions must happen before the loop starts, while a user gesture is active.
   const handleRenderAll = async () => {
+    // Snapshot clip metadata at the start of the batch.
+    // Using the current shorts value (closure) is safe HERE because we haven't
+    // started awaiting yet — shorts is fresh at this call site.
+    const batchItems = shorts.map((s, idx) => ({
+      index: idx,
+      status: s.status,
+    }));
+
+    isBatchRenderingRef.current = true;
     setIsBatchRendering(true);
-    for (let i = 0; i < shorts.length; i++) {
-      if (shorts[i].status !== 'ready') {
-        await handleRenderShort(i);
+
+    // Optional: warn once about 4K before the batch starts (not per-short)
+    // This collects the user decision during the button click (user gesture available).
+    if (resolutionTier === '4k' && deviceCaps && !deviceCaps.encode4k60.supported) {
+      const proceed = confirm(
+        '4K rendering may exceed this device\'s GPU capability. The entire batch will attempt 4K. Continue?'
+      );
+      if (!proceed) {
+        isBatchRenderingRef.current = false;
+        setIsBatchRendering(false);
+        return;
       }
     }
+
+    for (const item of batchItems) {
+      if (item.status !== 'ready') {
+        // isBatchMode=true — no confirm/picker dialogs inside the loop
+        await handleRenderShort(item.index, true);
+      }
+    }
+
+    isBatchRenderingRef.current = false;
     setIsBatchRendering(false);
   };
 

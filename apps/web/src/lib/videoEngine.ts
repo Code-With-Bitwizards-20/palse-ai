@@ -6,25 +6,33 @@
  *
  * PERFORMANCE ARCHITECTURE:
  *  PRIMARY PATH (when source is a File/Blob):
- *    mediabunny demux -> sequential VideoSampleSink.samples() -> VideoFrame
+ *    mediabunny demux -> sequential VideoSampleSink.samples() -> VideoSample.draw()
  *    -> canvas compositing -> VideoEncoder -> mp4-muxer
  *    ELIMINATES all per-frame random HTMLVideoElement seeks.
- *    Source FPS read from demuxer (accurate, not hardcoded 30).
+ *    Source FPS read from demuxer via computeFrameRateMetrics() (accurate).
  *
  *  FALLBACK PATH (when mediabunny decode unavailable or sourceFile absent):
- *    HTMLVideoElement seeked event (desktop regression fixed — no RVFC chain).
+ *    HTMLVideoElement seeked event (desktop) / RVFC (mobile Chrome).
+ *    TRANSACTIONAL: fallback gets its own fresh encoder+muxer — no partial
+ *    sequential output is ever mixed with fallback output.
  *
- * KEY FIXES vs previous commit (68bde2e):
- *  1. DESKTOP REGRESSION: Removed seeked->RVFC chain. Desktop uses seeked event
- *     ONLY. RVFC is used on mobile INSTEAD OF (not after) the seeked event.
- *  2. ENCODER CONFIG: Validated (codec, hardwareAcceleration) pair is now used
- *     exactly in VideoEncoder.configure() — no silent 'prefer-hardware' override.
- *  3. SEQUENTIAL DECODE: mediabunny eliminates N random seeks for N frames.
- *     30s @ 60fps = 1800 seeks eliminated on the primary path.
- *  4. SOURCE FPS: Read from demuxer metadata, not hardcoded to 30.
+ * KEY FIXES vs previous commit:
+ *  A. MEDIABUNNY FORMATS: Use singleton instances (MP4, QTFF, WEBM, MATROSKA)
+ *     NOT class constructors. Fixes: "options.formats must be an array of InputFormat"
+ *  B. VIDEOSAMPLE: Use sample.draw() — no unsafe 'as unknown as ImageBitmap' cast.
+ *  C. LAST SAMPLE LIFETIME: Clone sample before iterator advances/closes it.
+ *     Never render a closed VideoSample.
+ *  D. TRANSACTIONAL FALLBACK: Sequential attempt owns its own encoder+muxer.
+ *     Partial sequential output is discarded; fallback starts completely fresh.
+ *  E. FRAME RATE API: computeFrameRateMetrics() not getFrameRateMetrics().
+ *  F. ADAPTIVE AUDIO CACHE: Skip full-file PCM cache for sources >10 min
+ *     (prevents ~1 GB AudioBuffer for 40-minute source videos).
+ *  G. EVENT-DRIVEN BACKPRESSURE: VideoEncoder dequeue event replaces
+ *     setTimeout(0) — works correctly in background tabs.
+ *  H. DISPOSAL: input.dispose() called once; Symbol.dispose is redundant.
  *
  * Preserved optimizations:
- *  - AudioBuffer cached across all shorts per video source.
+ *  - AudioBuffer cached across all shorts per video source (short files).
  *  - Pre-allocated Float32Array interleave buffer in audio hot-loop.
  *  - VideoEncoder.isConfigSupported() results cached per session.
  *  - Cached vignette radial gradient (never reallocated per frame).
@@ -173,80 +181,25 @@ function getCachedVignette(
 }
 
 // ---------------------------------------------------------------------------
-// Core frame painter (shared by preview loop and render pipeline)
+// Core frame painter — TWO separate drawing paths:
+//  1. HTMLVideoElement / ImageBitmap / VideoFrame fallback path
+//  2. Mediabunny VideoSample primary path — uses sample.draw()
 // ---------------------------------------------------------------------------
 
-// renderFrameToCanvas accepts HTMLVideoElement (seek fallback path) OR
-// ImageBitmap/VideoFrame (sequential decode path) as the image source.
-export function renderFrameToCanvas(
+// Shared overlay renderer (vignette + hook + subtitles)
+function _applyOverlays(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  video: HTMLVideoElement | ImageBitmap | VideoFrame,
   targetWidth: number,
   targetHeight: number,
-  strategy: ReframeStrategy,
-  editingStyle: EditingStyle,
   currentTime: number,
   clipStartTime: number,
+  hook?: GeneratedHook,
   subtitles?: SubtitleCue[],
-  subtitleTheme?: SubtitleTheme,
-  hook?: GeneratedHook
+  subtitleTheme?: SubtitleTheme
 ) {
   const timeProgress = currentTime - clipStartTime;
-  // Determine source dimensions from whatever image source we have.
-  const srcW: number = (video as HTMLVideoElement).videoWidth
-    ?? (video as any).width ?? 0;
-  const srcH: number = (video as HTMLVideoElement).videoHeight
-    ?? (video as any).height ?? 0;
-
-  if (strategy === 'Fit + Blur') {
-    ctx.save();
-    ctx.filter = 'blur(30px) brightness(0.65)';
-    ctx.drawImage(video as CanvasImageSource, -40, -40, targetWidth + 80, targetHeight + 80);
-    ctx.restore();
-
-    const videoAspect = srcW / srcH;
-    let drawW = targetWidth;
-    let drawH = targetWidth / videoAspect;
-    if (drawH > targetHeight) { drawH = targetHeight; drawW = targetHeight * videoAspect; }
-    ctx.drawImage(video as CanvasImageSource, (targetWidth - drawW) / 2, (targetHeight - drawH) / 2, drawW, drawH);
-  } else {
-    const { cropX, cropY, cropWidth, cropHeight } = calculateReframeCrop(
-      srcW, srcH, targetWidth, targetHeight, strategy, timeProgress
-    );
-
-    let scaleEffect = 1.0, shakeX = 0, shakeY = 0;
-
-    if (editingStyle === 'High Energy' || editingStyle === 'Extreme') {
-      const bc = timeProgress % 4.5;
-      if (bc < 0.6) scaleEffect = 1.05;
-      if (editingStyle === 'Extreme' && bc < 0.25) {
-        shakeX = (Math.random() - 0.5) * 8;
-        shakeY = (Math.random() - 0.5) * 8;
-      }
-    } else if (editingStyle === 'Balanced') {
-      if ((timeProgress % 7.0) < 0.4) scaleEffect = 1.025;
-    }
-
-    ctx.save();
-    if (scaleEffect !== 1.0 || shakeX !== 0 || shakeY !== 0) {
-      ctx.translate(targetWidth / 2 + shakeX, targetHeight / 2 + shakeY);
-      ctx.scale(scaleEffect, scaleEffect);
-      ctx.translate(-targetWidth / 2, -targetHeight / 2);
-    }
-    if (editingStyle === 'Extreme' || editingStyle === 'High Energy') {
-      ctx.filter = 'contrast(106%) saturate(108%)';
-    } else if (editingStyle === 'Balanced') {
-      ctx.filter = 'contrast(103%) saturate(104%)';
-    }
-    ctx.drawImage(video as CanvasImageSource, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
-    ctx.restore();
-  }
-
-  // Vignette (cached, never recreated per frame)
   ctx.fillStyle = getCachedVignette(ctx, targetWidth, targetHeight);
   ctx.fillRect(0, 0, targetWidth, targetHeight);
-
-  // Hook overlay
   if (hook && timeProgress <= hook.suggestedDurationSeconds) {
     const fadeOut = Math.max(0, Math.min(1, (hook.suggestedDurationSeconds - timeProgress) / 0.4));
     ctx.save();
@@ -267,18 +220,168 @@ export function renderFrameToCanvas(
     ctx.fill();
     ctx.font = `800 ${Math.round(18 * scale)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
     ctx.fillStyle = '#38BDF8';
-    ctx.fillText(`⚡ ${hook.category.toUpperCase()}`, targetWidth / 2, hookY - 20 * scale);
+    ctx.fillText(`\u26a1 ${hook.category.toUpperCase()}`, targetWidth / 2, hookY - 20 * scale);
     ctx.font = `900 ${Math.round(36 * scale)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
     ctx.fillStyle = '#FFFFFF';
     ctx.fillText(hook.text.toUpperCase(), targetWidth / 2, hookY + 12 * scale);
     ctx.restore();
   }
-
-  // Subtitles — binary search, not linear scan
   if (subtitles && subtitleTheme) {
     const cue = findActiveCue(subtitles, currentTime);
     if (cue) drawSubtitlesOnCanvas(ctx, cue, currentTime, targetWidth, targetHeight, subtitleTheme);
   }
+}
+
+// Shared reframe + effects for CanvasImageSource (HTMLVideoElement / ImageBitmap / VideoFrame)
+function _drawCanvasImageSource(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  source: CanvasImageSource,
+  srcW: number,
+  srcH: number,
+  targetWidth: number,
+  targetHeight: number,
+  strategy: ReframeStrategy,
+  editingStyle: EditingStyle,
+  timeProgress: number
+) {
+  if (strategy === 'Fit + Blur') {
+    ctx.save();
+    ctx.filter = 'blur(30px) brightness(0.65)';
+    ctx.drawImage(source, -40, -40, targetWidth + 80, targetHeight + 80);
+    ctx.restore();
+    const videoAspect = srcW / srcH;
+    let drawW = targetWidth;
+    let drawH = targetWidth / videoAspect;
+    if (drawH > targetHeight) { drawH = targetHeight; drawW = targetHeight * videoAspect; }
+    ctx.drawImage(source, (targetWidth - drawW) / 2, (targetHeight - drawH) / 2, drawW, drawH);
+  } else {
+    const { cropX, cropY, cropWidth, cropHeight } = calculateReframeCrop(
+      srcW, srcH, targetWidth, targetHeight, strategy, timeProgress
+    );
+    let scaleEffect = 1.0, shakeX = 0, shakeY = 0;
+    if (editingStyle === 'High Energy' || editingStyle === 'Extreme') {
+      const bc = timeProgress % 4.5;
+      if (bc < 0.6) scaleEffect = 1.05;
+      if (editingStyle === 'Extreme' && bc < 0.25) {
+        shakeX = (Math.random() - 0.5) * 8;
+        shakeY = (Math.random() - 0.5) * 8;
+      }
+    } else if (editingStyle === 'Balanced') {
+      if ((timeProgress % 7.0) < 0.4) scaleEffect = 1.025;
+    }
+    ctx.save();
+    if (scaleEffect !== 1.0 || shakeX !== 0 || shakeY !== 0) {
+      ctx.translate(targetWidth / 2 + shakeX, targetHeight / 2 + shakeY);
+      ctx.scale(scaleEffect, scaleEffect);
+      ctx.translate(-targetWidth / 2, -targetHeight / 2);
+    }
+    if (editingStyle === 'Extreme' || editingStyle === 'High Energy') {
+      ctx.filter = 'contrast(106%) saturate(108%)';
+    } else if (editingStyle === 'Balanced') {
+      ctx.filter = 'contrast(103%) saturate(104%)';
+    }
+    ctx.drawImage(source, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
+    ctx.restore();
+  }
+}
+
+// Preview loop / fallback path: accepts HTMLVideoElement, ImageBitmap, or VideoFrame.
+export function renderFrameToCanvas(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  video: HTMLVideoElement | ImageBitmap | VideoFrame,
+  targetWidth: number,
+  targetHeight: number,
+  strategy: ReframeStrategy,
+  editingStyle: EditingStyle,
+  currentTime: number,
+  clipStartTime: number,
+  subtitles?: SubtitleCue[],
+  subtitleTheme?: SubtitleTheme,
+  hook?: GeneratedHook
+) {
+  const timeProgress = currentTime - clipStartTime;
+  const srcW: number = (video as HTMLVideoElement).videoWidth
+    ?? (video as any).displayWidth ?? (video as any).codedWidth ?? (video as any).width ?? 0;
+  const srcH: number = (video as HTMLVideoElement).videoHeight
+    ?? (video as any).displayHeight ?? (video as any).codedHeight ?? (video as any).height ?? 0;
+  _drawCanvasImageSource(ctx, video as CanvasImageSource, srcW, srcH, targetWidth, targetHeight, strategy, editingStyle, timeProgress);
+  _applyOverlays(ctx, targetWidth, targetHeight, currentTime, clipStartTime, hook, subtitles, subtitleTheme);
+}
+
+/**
+ * PRIMARY PATH: Render a Mediabunny VideoSample to the canvas.
+ * FIX B: Uses VideoSample.draw() — correctly handles rotation/flip metadata.
+ * No unsafe casts. No intermediate copies.
+ *
+ * VideoSample.draw() signature (from mediabunny 1.61 declarations):
+ *   draw(ctx, sx, sy, sWidth, sHeight, dx, dy, dWidth?, dHeight?): void
+ */
+function renderVideoSampleToCanvas(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  sample: {
+    displayWidth: number;
+    displayHeight: number;
+    draw(
+      context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+      sx: number, sy: number, sWidth: number, sHeight: number,
+      dx: number, dy: number, dWidth?: number, dHeight?: number
+    ): void;
+  },
+  targetWidth: number,
+  targetHeight: number,
+  strategy: ReframeStrategy,
+  editingStyle: EditingStyle,
+  currentTime: number,
+  clipStartTime: number,
+  subtitles?: SubtitleCue[],
+  subtitleTheme?: SubtitleTheme,
+  hook?: GeneratedHook
+): void {
+  const timeProgress = currentTime - clipStartTime;
+  const srcW = sample.displayWidth;
+  const srcH = sample.displayHeight;
+
+  if (strategy === 'Fit + Blur') {
+    ctx.save();
+    ctx.filter = 'blur(30px) brightness(0.65)';
+    sample.draw(ctx, 0, 0, srcW, srcH, -40, -40, targetWidth + 80, targetHeight + 80);
+    ctx.restore();
+    const videoAspect = srcW / srcH;
+    let drawW = targetWidth;
+    let drawH = targetWidth / videoAspect;
+    if (drawH > targetHeight) { drawH = targetHeight; drawW = targetHeight * videoAspect; }
+    sample.draw(ctx, 0, 0, srcW, srcH, (targetWidth - drawW) / 2, (targetHeight - drawH) / 2, drawW, drawH);
+  } else {
+    const { cropX, cropY, cropWidth, cropHeight } = calculateReframeCrop(
+      srcW, srcH, targetWidth, targetHeight, strategy, timeProgress
+    );
+    let scaleEffect = 1.0, shakeX = 0, shakeY = 0;
+    if (editingStyle === 'High Energy' || editingStyle === 'Extreme') {
+      const bc = timeProgress % 4.5;
+      if (bc < 0.6) scaleEffect = 1.05;
+      if (editingStyle === 'Extreme' && bc < 0.25) {
+        shakeX = (Math.random() - 0.5) * 8;
+        shakeY = (Math.random() - 0.5) * 8;
+      }
+    } else if (editingStyle === 'Balanced') {
+      if ((timeProgress % 7.0) < 0.4) scaleEffect = 1.025;
+    }
+    ctx.save();
+    if (scaleEffect !== 1.0 || shakeX !== 0 || shakeY !== 0) {
+      ctx.translate(targetWidth / 2 + shakeX, targetHeight / 2 + shakeY);
+      ctx.scale(scaleEffect, scaleEffect);
+      ctx.translate(-targetWidth / 2, -targetHeight / 2);
+    }
+    if (editingStyle === 'Extreme' || editingStyle === 'High Energy') {
+      ctx.filter = 'contrast(106%) saturate(108%)';
+    } else if (editingStyle === 'Balanced') {
+      ctx.filter = 'contrast(103%) saturate(104%)';
+    }
+    // FIX B: Use sample.draw() with crop params — handles rotation/flip metadata
+    sample.draw(ctx, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
+    ctx.restore();
+  }
+  _applyOverlays(ctx, targetWidth, targetHeight, currentTime, clipStartTime, hook, subtitles, subtitleTheme);
 }
 
 // ---------------------------------------------------------------------------
@@ -403,16 +506,19 @@ function createRenderCanvas(w: number, h: number): {
 }
 
 // ---------------------------------------------------------------------------
-// MOBILE OPTIMIZATION: Module-level AudioBuffer cache keyed by file identity.
+// AUDIO BUFFER CACHE — keyed by file identity.
 //
-// Previously renderShortToMp4() re-read the entire source file (arrayBuffer())
-// and re-ran AudioContext.decodeAudioData() for EVERY short. A 100 MB video
-// generating 5 shorts meant 5× 100 MB reads + 5× full audio decode on mobile,
-// causing massive GC pressure, CPU thermal throttling, and potential tab crash.
-//
-// Fix: decode once, cache the AudioBuffer, reuse for all shorts from the same
-// source. Cache is keyed by (name|size|lastModified) for File objects.
+// FIX F: Adaptive audio caching strategy.
+//   For source videos ≤ 10 minutes: decode once, cache the full AudioBuffer,
+//   reuse for all shorts (original mobile optimization preserved).
+//   For source videos > 10 minutes: skip full-file caching entirely.
+//   A 40-minute stereo 48kHz source would require:
+//   2411 × 48000 × 2 × 4 bytes ≈ 926 MB of PCM — unacceptable to hold.
+//   Instead decode the full buffer once per short and release it after use.
 // ---------------------------------------------------------------------------
+
+/** Sources longer than this will not have their full AudioBuffer cached. */
+const _AUDIO_CACHE_MAX_DURATION_S = 600; // 10 minutes
 
 interface _AudioCacheEntry {
   key: string;
@@ -501,6 +607,34 @@ async function selectEncoderConfig(
 }
 
 // ---------------------------------------------------------------------------
+// FIX G: Event-driven encoder backpressure
+//
+// Background tabs throttle setTimeout heavily. setTimeout(0) can stall for
+// multiple seconds, freezing the frame encode loop. This replaces the
+// timer-based drain with an event-driven Promise using VideoEncoder's
+// 'dequeue' event (Chrome 108+). Falls back to queueMicrotask() which is
+// NOT throttled by background-tab policies.
+// ---------------------------------------------------------------------------
+
+function waitForEncoderQueueBelow(encoder: VideoEncoder, threshold: number): Promise<void> {
+  if (encoder.encodeQueueSize <= threshold) return Promise.resolve();
+  if (typeof encoder.addEventListener === 'function') {
+    return new Promise<void>((resolve) => {
+      const check = () => {
+        if (encoder.encodeQueueSize <= threshold) {
+          resolve();
+        } else {
+          encoder.addEventListener('dequeue', check, { once: true });
+        }
+      };
+      encoder.addEventListener('dequeue', check, { once: true });
+    });
+  }
+  // Fallback: microtask yield — never throttled by background-tab policy
+  return new Promise<void>((resolve) => queueMicrotask(resolve));
+}
+
+// ---------------------------------------------------------------------------
 // Synchronized AAC stereo audio encoder
 // ---------------------------------------------------------------------------
 
@@ -584,18 +718,32 @@ async function encodeAudioFromBuffer(
 // ---------------------------------------------------------------------------
 // Sequential frame decode pipeline using mediabunny.
 //
-// Replaces per-frame random HTMLVideoElement seeks with:
-//   mediabunny BlobSource -> Input -> VideoSampleSink.samples() iterator
-//   Each VideoSample wraps a VideoFrame ready for drawImage().
+// FIX A: Use singleton instances (MP4, QTFF, WEBM, MATROSKA) — NOT classes.
+//   "Do not instantiate this class; use the MP4 singleton instead."
+//   Using class constructors caused: "options.formats must be an array of InputFormat"
 //
-// For [startTime, endTime]:
-//  1. mediabunny demuxes the source Blob/File once
-//  2. samples(startTime, endTime) decodes sequentially from preceding keyframe
-//  3. Each VideoSample is a VideoFrame ready for drawImage() — zero seeks
+// FIX B: Use renderVideoSampleToCanvas() which calls sample.draw() —
+//   the correct Mediabunny API. No unsafe 'as unknown as ImageBitmap' cast.
 //
-// Source FPS from demuxer FrameRateMetrics (accurate: 24/25/30/50/60 etc).
-// Output FPS > source FPS: each source frame rendered N times (no extra seeks).
+// FIX C: Never render a closed VideoSample.
+//   Clone the final sample before the iterator loop exits so the clone
+//   remains valid for fill-cadence. The clone is owned by us and closed after.
+//
+// FIX E: computeFrameRateMetrics() — correct method name in 1.61.x.
+//
+// FIX G: Event-driven backpressure (waitForEncoderQueueBelow) replaces setTimeout.
+//
+// TRANSACTIONAL: Returns { success, encodedFrames }. The caller (renderShortToMp4)
+// passes in its own dedicated encoder+muxer for the sequential attempt.
+// If success=false, the caller discards that attempt and creates a fresh
+// encoder+muxer for the fallback. Partial sequential output is NEVER mixed
+// with fallback output.
 // ---------------------------------------------------------------------------
+
+interface SequentialDecodeResult {
+  success: boolean;
+  encodedFrames: number;
+}
 
 async function trySequentialDecode(
   sourceFile: File | Blob,
@@ -618,125 +766,182 @@ async function trySequentialDecode(
   subtitleTheme: SubtitleTheme | undefined,
   hook: GeneratedHook | undefined,
   onProgress: (pct: number, stage: string) => void
-): Promise<{ success: boolean }> {
-  // Dynamic import avoids SSR issues and keeps mediabunny tree-shaken
-  // when not needed (e.g. fallback-only builds).
+): Promise<SequentialDecodeResult> {
   let mb: any;
   try {
     mb = await import('mediabunny');
   } catch {
-    return { success: false };
+    return { success: false, encodedFrames: 0 };
   }
 
-  const { Input, Mp4InputFormat, QuickTimeInputFormat, WebMInputFormat,
-          MatroskaInputFormat, BlobSource, VideoSampleSink } = mb;
+  // FIX A: Use SINGLETON instances exported from mediabunny, NOT class constructors.
+  // The TypeScript declaration file says:
+  //   "Do not instantiate this class; use the MP4 singleton instead."
+  // Passing the class (Mp4InputFormat) instead of the instance (MP4) caused:
+  //   TypeError: options.formats must be an array of InputFormat
+  const { Input, BlobSource, VideoSampleSink } = mb;
+  const MP4      = mb.MP4;
+  const QTFF     = mb.QTFF;
+  const WEBM     = mb.WEBM;
+  const MATROSKA = mb.MATROSKA;
 
-  const formats = [Mp4InputFormat, QuickTimeInputFormat, WebMInputFormat, MatroskaInputFormat]
-    .filter(Boolean);
-  if (!formats.length) return { success: false };
+  if (!MP4 || !QTFF || !WEBM || !MATROSKA || !Input || !BlobSource || !VideoSampleSink) {
+    console.warn('[VideoEngine] Mediabunny API mismatch — required singleton exports not found');
+    return { success: false, encodedFrames: 0 };
+  }
+
+  const formats = [MP4, QTFF, WEBM, MATROSKA];
 
   let input: any = null;
+  let encodedFrames = 0;
+
   try {
     input = new Input({ formats, source: new BlobSource(sourceFile) });
 
-    const tracks: any[] = await input.getTracks?.() ?? [];
-    const videoTrack = tracks.find(
-      (t: any) => t.type === 'video' ||
-        (mb.InputVideoTrack && t instanceof mb.InputVideoTrack)
-    );
-    if (!videoTrack) return { success: false };
+    // Use getVideoTracks() — the typed public API for video track access
+    let videoTrack: any = null;
+    try {
+      const vtracks = await input.getVideoTracks();
+      videoTrack = vtracks[0] ?? null;
+    } catch {
+      const allTracks: any[] = await input.getTracks?.() ?? [];
+      videoTrack = allTracks.find((t: any) => t.type === 'video' || t.isVideoTrack?.()) ?? null;
+    }
 
-    const canDecode = await videoTrack.canDecode?.();
-    if (!canDecode) return { success: false };
+    if (!videoTrack) {
+      console.warn('[VideoEngine] Sequential: no video track found in source');
+      return { success: false, encodedFrames: 0 };
+    }
 
-    // Read actual source FPS accurately from demuxer metadata.
+    const canDecode = await videoTrack.canDecode();
+    if (!canDecode) {
+      console.warn('[VideoEngine] Sequential: video track codec cannot be decoded');
+      return { success: false, encodedFrames: 0 };
+    }
+
+    // FIX E: computeFrameRateMetrics() is the correct method name in mediabunny 1.61.
+    // The old code called getFrameRateMetrics() which does NOT exist.
     let sourceFps = 30;
     try {
-      const metrics = await videoTrack.getFrameRateMetrics?.({ targetPacketCount: 64 });
+      const metrics = await videoTrack.computeFrameRateMetrics({ targetPacketCount: 64 });
       if (metrics?.bestGuessFrameRate > 0) sourceFps = metrics.bestGuessFrameRate;
-    } catch { /* non-fatal, fallback to 30 */ }
+    } catch { /* non-fatal — fall back to 30 fps assumption */ }
 
-    const sink = new VideoSampleSink(videoTrack, { hardwareAcceleration: 'prefer-hardware' });
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[VideoEngine] pipeline=sequential-mediabunny | sourceFps=${sourceFps} | outputFps=${fps}`);
+    }
 
-    // How many output frames does each source frame cover?
-    // 30fps src -> 60fps output: ratio=2 (each source frame rendered twice)
-    // 60fps src -> 60fps output: ratio=1
-    // 60fps src -> 30fps output: ratio=1 (mediabunny iterator skips extra frames)
+    const sink = new VideoSampleSink(videoTrack, { hardwareAcceleration: 'no-preference' });
     const ratio = Math.max(1, Math.round(fps / sourceFps));
 
     let fi = 0;
     let encoderError: Error | null = null;
-    let lastSample: any = null;
 
-    // samples() returns an async iterator decoding sequentially from the
-    // keyframe at/before startTime — zero per-frame seeks.
-    for await (const sample of sink.samples(startTime, endTime)) {
-      if (encoderError) throw encoderError;
-      if (!sample) continue;
-      lastSample = sample;
+    // FIX C: Never render a closed VideoSample.
+    // We need the last decoded frame to fill remaining output cadence frames
+    // (when output fps > source fps, or at clip boundary).
+    // Clone it before the iterator advances (which closes the previous sample).
+    // The clone is owned by us and MUST be closed after use.
+    let lastSampleClone: any = null;
 
-      for (let rep = 0; rep < ratio && fi < totalFrames; rep++) {
-        const sec = clipStartTime + fi * stepSeconds;
-        renderFrameToCanvas(
-          ctx,
-          sample as unknown as ImageBitmap,
-          targetWidth, targetHeight,
-          reframeStrategy, editingStyle,
-          sec, clipStartTime,
-          subtitles, subtitleTheme, hook
-        );
-        const vf = new VideoFrame(canvas as HTMLCanvasElement, {
-          timestamp: fi * frameDurationUs,
-          duration: frameDurationUs,
-        });
-        videoEncoder.encode(vf, { keyFrame: fi % keyframeInterval === 0 });
-        vf.close();
+    try {
+      for await (const sample of sink.samples(startTime, endTime)) {
+        if (encoderError) throw encoderError;
+        if (!sample) continue;
 
-        // Dynamic backpressure: desktop encoder drains fast (allow larger queue),
-        // mobile encoder is slower (keep queue smaller to avoid OOM).
-        const bpThreshold = _isMobile ? 6 : 12;
-        if (videoEncoder.encodeQueueSize > bpThreshold) {
-          await new Promise((r) => setTimeout(r, 0));
+        // Release the previous clone now that we have a new fresh sample
+        if (lastSampleClone) {
+          lastSampleClone.close();
+          lastSampleClone = null;
         }
 
-        // Throttle React progress updates (~fps/5 per second = ~12 updates/s at 60fps)
-        if (fi % Math.max(5, Math.floor(fps / 5)) === 0 || fi === totalFrames - 1) {
-          const pct = Math.round(5 + (fi / totalFrames) * 85);
-          onProgress(pct, `Processing frame ${fi + 1}/${totalFrames} @ ${fps} FPS`);
+        for (let rep = 0; rep < ratio && fi < totalFrames; rep++) {
+          if (encoderError) throw encoderError;
+          const sec = clipStartTime + fi * stepSeconds;
+
+          // FIX B: Use renderVideoSampleToCanvas which calls sample.draw()
+          renderVideoSampleToCanvas(
+            ctx, sample,
+            targetWidth, targetHeight,
+            reframeStrategy, editingStyle,
+            sec, clipStartTime,
+            subtitles, subtitleTheme, hook
+          );
+
+          const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+            timestamp: fi * frameDurationUs,
+            duration: frameDurationUs,
+          });
+          videoEncoder.encode(vf, { keyFrame: fi % keyframeInterval === 0 });
+          vf.close();
+          encodedFrames++;
+
+          // FIX G: Event-driven backpressure — works in background tabs
+          const bpThreshold = _isMobile ? 6 : 12;
+          if (videoEncoder.encodeQueueSize > bpThreshold) {
+            await waitForEncoderQueueBelow(videoEncoder, bpThreshold);
+          }
+
+          if (fi % Math.max(5, Math.floor(fps / 5)) === 0 || fi === totalFrames - 1) {
+            const pct = Math.round(5 + (fi / totalFrames) * 85);
+            onProgress(pct, `Processing frame ${fi + 1}/${totalFrames} @ ${fps} FPS`);
+          }
+          fi++;
         }
-        fi++;
+
+        // FIX C: Clone BEFORE the iterator advances and closes this sample.
+        // The async iterator owns sample lifetime; we must not call close() on it.
+        if (fi < totalFrames) {
+          lastSampleClone = sample.clone();
+        }
+
+        if (fi >= totalFrames) break;
       }
-      sample.close?.();
-      if (fi >= totalFrames) break;
+    } finally {
+      // If we're done (fi >= totalFrames), lastSampleClone is no longer needed
+      if (lastSampleClone && fi >= totalFrames) {
+        lastSampleClone.close();
+        lastSampleClone = null;
+      }
     }
 
-    // Fill any remaining frames using last decoded sample (boundary handling).
-    while (lastSample && fi < totalFrames) {
-      if (encoderError) throw encoderError;
-      const sec = clipStartTime + fi * stepSeconds;
-      renderFrameToCanvas(
-        ctx,
-        lastSample as unknown as ImageBitmap,
-        targetWidth, targetHeight,
-        reframeStrategy, editingStyle,
-        sec, clipStartTime,
-        subtitles, subtitleTheme, hook
-      );
-      const vf = new VideoFrame(canvas as HTMLCanvasElement, {
-        timestamp: fi * frameDurationUs, duration: frameDurationUs,
-      });
-      videoEncoder.encode(vf, { keyFrame: false });
-      vf.close();
-      fi++;
+    // Fill remaining output cadence using the last decoded sample clone
+    if (lastSampleClone) {
+      try {
+        while (fi < totalFrames) {
+          if (encoderError) throw encoderError;
+          const sec = clipStartTime + fi * stepSeconds;
+          renderVideoSampleToCanvas(
+            ctx, lastSampleClone,
+            targetWidth, targetHeight,
+            reframeStrategy, editingStyle,
+            sec, clipStartTime,
+            subtitles, subtitleTheme, hook
+          );
+          const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+            timestamp: fi * frameDurationUs, duration: frameDurationUs,
+          });
+          videoEncoder.encode(vf, { keyFrame: false });
+          vf.close();
+          encodedFrames++;
+          fi++;
+        }
+      } finally {
+        lastSampleClone.close(); // Always close the clone we own
+        lastSampleClone = null;
+      }
     }
 
-    return { success: true };
+    if (encoderError) throw encoderError;
+    return { success: true, encodedFrames };
+
   } catch (err) {
     console.warn('[VideoEngine] Sequential decode failed, using seek fallback:', err);
-    return { success: false };
+    return { success: false, encodedFrames };
   } finally {
-    try { input?.[Symbol.dispose]?.(); } catch { /* noop */ }
-    try { await input?.dispose?.(); } catch { /* noop */ }
+    // FIX H: Use input.dispose() — the correct synchronous disposal API.
+    // Never call both Symbol.dispose and dispose(); that calls dispose() twice.
+    try { input?.dispose?.(); } catch { /* noop */ }
   }
 }
 
@@ -799,6 +1004,8 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
   prog(1, `Initializing render @ ${fps} FPS (${totalFrames} frames)...`);
 
   // 2. Prepare audio track — use cached AudioBuffer if available for this file.
+  //    FIX F: Skip full-file PCM cache for long sources (>10 min) to avoid
+  //    holding ~1 GB of decoded audio in memory during a 40-short batch.
   let audioBuffer: AudioBuffer | null = null;
   let targetAudioSampleRate = 48000;
   let targetAudioChannels = 2;
@@ -857,20 +1064,147 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
         } catch {
           audioEncoderSupported = false;
         }
-        _audioCacheEntry = {
-          key: cacheKey,
-          audioBuffer,
-          sampleRate: targetAudioSampleRate,
-          channels: targetAudioChannels,
-          audioEncoderSupported,
-        };
+        // FIX F: Only cache if source is short enough to be memory-safe.
+        // sourceVideo.duration is 0 for first render before metadata loads;
+        // in that case we conservatively cache (short source assumption).
+        const sourceDuration = sourceVideo.duration > 0 ? sourceVideo.duration : 0;
+        const safeToCache = sourceDuration === 0 || sourceDuration <= _AUDIO_CACHE_MAX_DURATION_S;
+        if (safeToCache) {
+          _audioCacheEntry = {
+            key: cacheKey,
+            audioBuffer,
+            sampleRate: targetAudioSampleRate,
+            channels: targetAudioChannels,
+            audioEncoderSupported,
+          };
+        }
+        // For long sources: audioBuffer used for this render only; GC'd after function returns.
       }
     }
   } catch (err) {
     console.warn('[VideoEngine] Audio decode skipped:', err);
   }
 
-  // 3. Set up MP4 Muxer
+  // 3. Configure encoder
+  if (typeof VideoEncoder === 'undefined') {
+    throw new Error('WebCodecs VideoEncoder is not available in your browser.');
+  }
+
+  prog(3, 'Configuring hardware video encoder...');
+
+  // ENCODER CONFIG FIX: selectEncoderConfig() returns the EXACT (codec, hardwareAcceleration)
+  // pair that was validated. We use it exactly in configure() — no silent override.
+  const selectedConfig = await selectEncoderConfig(targetWidth, targetHeight, br, fps);
+
+  // 4. Create render canvas (shared across both pipeline attempts)
+  const { canvas, ctx } = createRenderCanvas(targetWidth, targetHeight);
+  if (!ctx) throw new Error('Render canvas context could not be created.');
+
+  prog(5, `Rendering ${totalFrames} frames (${selectedConfig.codec})...`);
+
+  // ---------------------------------------------------------------------------
+  // 5. PRIMARY: Sequential mediabunny decode attempt
+  //
+  // FIX D (Transactional architecture):
+  // The sequential attempt gets its OWN dedicated encoder + muxer.
+  // If it fails after partially encoding frames, those resources are discarded
+  // and the fallback starts completely fresh. This prevents corrupted output
+  // with duplicate/non-monotonic timestamps.
+  // ---------------------------------------------------------------------------
+  let usedPipeline = `sequential-${selectedConfig.codec}`;
+  let sequentialSuccess = false;
+
+  if (sourceFile) {
+    // Sequential attempt: own encoder + muxer (TRANSACTIONAL — never mixed with fallback)
+    const seqMuxerTarget = new ArrayBufferTarget();
+    const seqMuxer = new Muxer({
+      target: seqMuxerTarget,
+      video: { codec: 'avc', width: targetWidth, height: targetHeight },
+      ...(audioEncoderSupported
+        ? { audio: { codec: 'aac', numberOfChannels: targetAudioChannels, sampleRate: targetAudioSampleRate } }
+        : {}),
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset',
+    });
+
+    let seqEncoderError: Error | null = null;
+    const seqEncoder = new VideoEncoder({
+      output: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => {
+        seqMuxer.addVideoChunk(chunk, meta);
+      },
+      error: (e: Error) => {
+        seqEncoderError = e instanceof Error ? e : new Error(String(e));
+      },
+    });
+
+    seqEncoder.configure({
+      codec: selectedConfig.codec,
+      width: targetWidth,
+      height: targetHeight,
+      bitrate: br,
+      framerate: fps,
+      hardwareAcceleration: selectedConfig.hardwareAcceleration,
+    });
+
+    const seqResult = await trySequentialDecode(
+      sourceFile, startTime, endTime,
+      targetWidth, targetHeight,
+      fps, frameDurationUs, totalFrames, stepSeconds,
+      canvas, ctx, seqEncoder, keyframeInterval,
+      reframeStrategy, editingStyle, startTime,
+      subtitles, subtitleTheme, hook, prog
+    );
+
+    if (seqResult.success && !seqEncoderError) {
+      // Sequential succeeded — finalize this encoder+muxer
+      if (audioEncoderSupported && audioBuffer) {
+        prog(92, '\u26a1 Encoding synchronized AAC stereo audio...');
+        try {
+          await encodeAudioFromBuffer(audioBuffer, startTime, endTime,
+            targetAudioSampleRate, targetAudioChannels, seqMuxer);
+        } catch (audioErr) {
+          console.warn('[VideoEngine] AAC audio encoding skipped:', audioErr);
+        }
+      }
+      prog(96, '\u26a1 Finalizing MP4 container...');
+      await seqEncoder.flush();
+      seqEncoder.close();
+      seqMuxer.finalize();
+
+      if (fileHandle) {
+        const fileStream = await fileHandle.createWritable();
+        try {
+          await fileStream.write(seqMuxerTarget.buffer);
+        } finally {
+          await fileStream.close();
+        }
+        prog(100, '\u26a1 Render complete! Streamed directly to disk.');
+        return { duration, width: targetWidth, height: targetHeight, fps,
+          fileSizeBytes: 0, streamedToDisk: true, pipeline: usedPipeline };
+      }
+
+      const blob = new Blob([seqMuxerTarget.buffer], { type: 'video/mp4' });
+      prog(100, '\u26a1 Render complete!');
+      return { blob, duration, width: targetWidth, height: targetHeight, fps,
+        fileSizeBytes: blob.size, streamedToDisk: false, pipeline: usedPipeline };
+    } else {
+      // Sequential failed — discard partial resources, proceed to fresh fallback
+      try { seqEncoder.close(); } catch { /* already closed or in error state */ }
+      // seqMuxer partial output is simply abandoned (no finalize)
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[VideoEngine] Sequential failed after ${seqResult.encodedFrames} frames — starting fresh fallback.`);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. FALLBACK: HTMLVideoElement seek-based pipeline
+  //    TRANSACTIONAL: completely fresh encoder + muxer — no sequential state carried over.
+  //    Desktop: seeked event only (REGRESSION FIX — no extra RVFC round-trip)
+  //    Mobile:  RVFC only (avoids blank-frame race on Android)
+  // ---------------------------------------------------------------------------
+  usedPipeline = `seek-fallback-${selectedConfig.codec}`;
+
   let muxerTarget: ArrayBufferTarget | FileSystemWritableFileStreamTarget;
   let fileStream: any = null;
   if (fileHandle) {
@@ -890,13 +1224,6 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     firstTimestampBehavior: 'offset',
   });
 
-  // 4. Configure WebCodecs Hardware VideoEncoder
-  if (typeof VideoEncoder === 'undefined') {
-    throw new Error('WebCodecs VideoEncoder is not available in your browser.');
-  }
-
-  prog(3, 'Configuring hardware video encoder...');
-
   let encoderError: Error | null = null;
   const videoEncoder = new VideoEncoder({
     output: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => {
@@ -907,10 +1234,6 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     },
   });
 
-  // ENCODER CONFIG FIX: selectEncoderConfig() returns the EXACT (codec, hardwareAcceleration)
-  // pair that was validated. We use it exactly in configure() — no silent override.
-  const selectedConfig = await selectEncoderConfig(targetWidth, targetHeight, br, fps);
-
   videoEncoder.configure({
     codec: selectedConfig.codec,
     width: targetWidth,
@@ -920,139 +1243,91 @@ export async function renderShortToMp4(options: RenderOptions): Promise<RenderRe
     hardwareAcceleration: selectedConfig.hardwareAcceleration,
   });
 
-  // 5. Create render canvas
-  const { canvas, ctx } = createRenderCanvas(targetWidth, targetHeight);
-  if (!ctx) throw new Error('Render canvas context could not be created.');
-
-  prog(5, `Rendering ${totalFrames} frames (${selectedConfig.codec})...`);
-
-  // 6. PRIMARY: Try sequential mediabunny decode (zero per-frame seeks)
-  let usedPipeline = `sequential-${selectedConfig.codec}`;
-  let sequentialSuccess = false;
-
-  if (sourceFile) {
-    const result = await trySequentialDecode(
-      sourceFile, startTime, endTime,
-      targetWidth, targetHeight,
-      fps, frameDurationUs, totalFrames, stepSeconds,
-      canvas, ctx, videoEncoder, keyframeInterval,
-      reframeStrategy, editingStyle, startTime,
-      subtitles, subtitleTheme, hook, prog
-    );
-    sequentialSuccess = result.success;
+  // Validate fallback source before beginning frame loop
+  if (!sourceVideo.src || sourceVideo.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) {
+    videoEncoder.close();
+    throw new Error('[VideoEngine] Fallback: sourceVideo has no valid src — cannot render.');
   }
 
-  // 7. FALLBACK: HTMLVideoElement seek-based pipeline
-  //    Desktop: seeked event only (REGRESSION FIX — no extra RVFC round-trip)
-  //    Mobile:  RVFC only (avoids blank-frame race on Android)
-  if (!sequentialSuccess) {
-    usedPipeline = `seek-fallback-${selectedConfig.codec}`;
+  const prevMuted = sourceVideo.muted;
+  const prevPaused = sourceVideo.paused;
+  sourceVideo.muted = true;
+  sourceVideo.pause();
 
-    const prevMuted = sourceVideo.muted;
-    const prevPaused = sourceVideo.paused;
-    sourceVideo.muted = true;
-    sourceVideo.pause();
+  try {
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      if (encoderError) throw encoderError;
 
-    try {
-      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
-        if (encoderError) throw encoderError;
+      const currentSec = startTime + frameIndex * stepSeconds;
+      await seekVideoTo(sourceVideo, currentSec);
 
-        const currentSec = startTime + frameIndex * stepSeconds;
-        await seekVideoTo(sourceVideo, currentSec);
-
-        renderFrameToCanvas(
-          ctx,
-          sourceVideo,
-          targetWidth,
-          targetHeight,
-          reframeStrategy,
-          editingStyle,
-          currentSec,
-          startTime,
-          subtitles,
-          subtitleTheme,
-          hook
-        );
-
-        const timestampUs = frameIndex * frameDurationUs;
-        const vf = new VideoFrame(canvas as HTMLCanvasElement, {
-          timestamp: timestampUs,
-          duration: frameDurationUs,
-        });
-
-        const isKeyFrame = frameIndex % keyframeInterval === 0;
-        videoEncoder.encode(vf, { keyFrame: isKeyFrame });
-        vf.close();
-
-        // Dynamic backpressure tuned per device type
-        const bpThreshold = _isMobile ? 4 : 8;
-        if (videoEncoder.encodeQueueSize > bpThreshold) {
-          await new Promise((r) => setTimeout(r, 0));
-        }
-
-        // Throttle progress updates to ~fps/5 cadence to reduce React overhead
-        if (frameIndex % Math.max(5, Math.floor(fps / 5)) === 0 || frameIndex === totalFrames - 1) {
-          const pct = Math.round(5 + (frameIndex / totalFrames) * 85);
-          prog(pct, `Processing frame ${frameIndex + 1}/${totalFrames} @ ${fps} FPS`);
-        }
+      if (sourceVideo.error) {
+        throw new Error(`[VideoEngine] Fallback: video error during seek: ${sourceVideo.error.message}`);
       }
-    } finally {
-      sourceVideo.muted = prevMuted;
-      if (!prevPaused) sourceVideo.play().catch(() => {});
+      if (sourceVideo.videoWidth === 0 || sourceVideo.videoHeight === 0) {
+        throw new Error('[VideoEngine] Fallback: video dimensions are zero — source may be invalid.');
+      }
+
+      renderFrameToCanvas(
+        ctx, sourceVideo,
+        targetWidth, targetHeight,
+        reframeStrategy, editingStyle,
+        currentSec, startTime,
+        subtitles, subtitleTheme, hook
+      );
+
+      const vf = new VideoFrame(canvas as HTMLCanvasElement, {
+        timestamp: frameIndex * frameDurationUs,
+        duration: frameDurationUs,
+      });
+      videoEncoder.encode(vf, { keyFrame: frameIndex % keyframeInterval === 0 });
+      vf.close();
+
+      // FIX G: Event-driven backpressure — works in background tabs
+      const bpThreshold = _isMobile ? 4 : 8;
+      if (videoEncoder.encodeQueueSize > bpThreshold) {
+        await waitForEncoderQueueBelow(videoEncoder, bpThreshold);
+      }
+
+      if (frameIndex % Math.max(5, Math.floor(fps / 5)) === 0 || frameIndex === totalFrames - 1) {
+        const pct = Math.round(5 + (frameIndex / totalFrames) * 85);
+        prog(pct, `Processing frame ${frameIndex + 1}/${totalFrames} @ ${fps} FPS`);
+      }
     }
+  } finally {
+    sourceVideo.muted = prevMuted;
+    if (!prevPaused) sourceVideo.play().catch(() => {});
   }
 
   if (encoderError) throw encoderError;
 
-  // 8. Encode synchronized stereo AAC audio
+  // 7. Encode audio for fallback path
   if (audioEncoderSupported && audioBuffer) {
-    prog(92, '⚡ Encoding synchronized AAC stereo audio...');
+    prog(92, '\u26a1 Encoding synchronized AAC stereo audio...');
     try {
-      await encodeAudioFromBuffer(
-        audioBuffer,
-        startTime,
-        endTime,
-        targetAudioSampleRate,
-        targetAudioChannels,
-        muxer
-      );
+      await encodeAudioFromBuffer(audioBuffer, startTime, endTime,
+        targetAudioSampleRate, targetAudioChannels, muxer);
     } catch (audioErr) {
       console.warn('[VideoEngine] AAC audio encoding skipped:', audioErr);
     }
   }
 
-  // 9. Finalize VideoEncoder & MP4 container
-  prog(96, '⚡ Finalizing MP4 container...');
+  // 8. Finalize
+  prog(96, '\u26a1 Finalizing MP4 container...');
   await videoEncoder.flush();
   videoEncoder.close();
   muxer.finalize();
 
   if (fileStream) {
     await fileStream.close();
-    prog(100, '⚡ Render complete! Streamed directly to disk.');
-    return {
-      duration,
-      width: targetWidth,
-      height: targetHeight,
-      fps,
-      fileSizeBytes: 0,
-      streamedToDisk: true,
-      pipeline: usedPipeline,
-    };
+    prog(100, '\u26a1 Render complete! Streamed directly to disk.');
+    return { duration, width: targetWidth, height: targetHeight, fps,
+      fileSizeBytes: 0, streamedToDisk: true, pipeline: usedPipeline };
   }
 
   const buf = (muxerTarget as ArrayBufferTarget).buffer;
   const blob = new Blob([buf], { type: 'video/mp4' });
-
-  prog(100, '⚡ Render complete!');
-  return {
-    blob,
-    duration,
-    width: targetWidth,
-    height: targetHeight,
-    fps,
-    fileSizeBytes: blob.size,
-    streamedToDisk: false,
-    pipeline: usedPipeline,
-  };
+  prog(100, '\u26a1 Render complete!');
+  return { blob, duration, width: targetWidth, height: targetHeight, fps,
+    fileSizeBytes: blob.size, streamedToDisk: false, pipeline: usedPipeline };
 }
