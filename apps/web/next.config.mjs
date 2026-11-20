@@ -1,6 +1,5 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  ...(process.env.NODE_ENV === 'production' && !process.env.VERCEL ? { output: 'export' } : {}),
   reactStrictMode: true,
   compress: true,
   poweredByHeader: false,

@@ -19,9 +19,9 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   metadataBase: new URL(APP_CONFIG.url || 'https://palse-ai-by-code-with-bitwizards.vercel.app'),
-  title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+  title: 'PulseCut AI — Cloud-Powered Video to Shorts Studio',
   description:
-    '100% in-browser, privacy-first AI video clipping studio. Converts long videos into 60 FPS platform-ready Shorts with zero server uploads and zero API keys.',
+    'AI-powered video clipping studio. Upload your video, let our cloud workers analyze and create platform-ready Shorts with smart reframing, captions, and professional editing.',
   keywords: [
     'video to shorts',
     'AI video editor',
@@ -29,8 +29,8 @@ export const metadata: Metadata = {
     'tiktok video editor',
     'instagram reels editor',
     'AI captions',
-    'local AI video editor',
-    'private browser video editor',
+    'cloud AI video editor',
+    'video shorts maker',
     '60 fps short video',
   ],
   authors: [{ name: APP_CONFIG.author }],
@@ -51,19 +51,19 @@ export const metadata: Metadata = {
   },
   manifest: '/manifest.webmanifest',
   openGraph: {
-    title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+    title: 'PulseCut AI — Cloud-Powered Video to Shorts Studio',
     description:
-      'Turn long videos into scroll-stopping 60 FPS Shorts directly in your browser. 100% local processing, zero cloud uploads.',
+      'AI-powered video clipping studio. Upload your video, let our cloud workers analyze and create platform-ready Shorts with smart reframing, captions, and professional editing.',
     type: 'website',
     locale: 'en_US',
-    siteName: 'PulseCut Local AI',
+    siteName: 'PulseCut AI',
     url: APP_CONFIG.url,
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+    title: 'PulseCut AI — Cloud-Powered Video to Shorts Studio',
     description:
-      'Turn long videos into scroll-stopping 60 FPS Shorts directly in your browser. 100% local processing, zero cloud uploads.',
+      'AI-powered video clipping studio. Upload your video, let our cloud workers analyze and create platform-ready Shorts with smart reframing, captions, and professional editing.',
   },
 };
 

@@ -10,28 +10,29 @@ import {
   ShieldCheck,
   Eye,
   Lock,
+  Zap,
 } from 'lucide-react';
 
 export const metadata: Metadata = {
-  title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+  title: 'PulseCut AI — Cloud-Powered Video to Shorts Studio',
   description:
-    '100% in-browser, privacy-first AI video clipping studio. Converts long videos into 60 FPS platform-ready Shorts with zero server uploads and zero API keys.',
+    'AI-powered video clipping studio. Upload your video, let our cloud workers analyze and create platform-ready Shorts with smart reframing, captions, and professional editing.',
   alternates: {
     canonical: 'https://palse-ai-by-code-with-bitwizards.vercel.app',
   },
   openGraph: {
-    title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+    title: 'PulseCut AI — Cloud-Powered Video to Shorts Studio',
     description:
-      'Turn long videos into scroll-stopping 60 FPS Shorts directly in your browser. 100% local processing, zero cloud uploads.',
+      'AI-powered video clipping studio. Upload your video, let our cloud workers analyze and create platform-ready Shorts with smart reframing, captions, and professional editing.',
     url: 'https://palse-ai-by-code-with-bitwizards.vercel.app',
-    siteName: 'PulseCut Local AI',
+    siteName: 'PulseCut AI',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'PulseCut Local AI — Private Long Video to Shorts Studio',
+    title: 'PulseCut AI — Cloud-Powered Video to Shorts Studio',
     description:
-      'Turn long videos into scroll-stopping 60 FPS Shorts directly in your browser. 100% local processing, zero cloud uploads.',
+      'AI-powered video clipping studio. Upload your video, let our cloud workers analyze and create platform-ready Shorts with smart reframing, captions, and professional editing.',
   },
 };
 
@@ -45,15 +46,19 @@ export default function HomePage() {
         <div className="absolute top-1/3 left-1/4 w-[380px] h-[250px] bg-accent-cyan/15 blur-[110px] -z-10 rounded-full pointer-events-none" />
 
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center space-y-8">
-          {/* Dual Privacy Badges */}
+          {/* Badges */}
           <div className="flex flex-wrap items-center justify-center gap-3">
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-1 text-xs font-semibold text-emerald-300 backdrop-blur-md">
-              <ShieldCheck className="h-4 w-4 text-emerald-400" />
-              <span>100% local processing</span>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-brand-500/30 bg-brand-500/10 px-4 py-1 text-xs font-semibold text-brand-300 backdrop-blur-md">
+              <Zap className="h-4 w-4 text-brand-400" />
+              <span>⚡ Cloud-Powered Processing</span>
             </div>
             <div className="inline-flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/10 px-4 py-1 text-xs font-semibold text-blue-300 backdrop-blur-md">
               <Lock className="h-3.5 w-3.5 text-blue-400" />
               <span>No account required</span>
+            </div>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-1 text-xs font-semibold text-emerald-300 backdrop-blur-md">
+              <ShieldCheck className="h-4 w-4 text-emerald-400" />
+              <span>🔒 Your data is encrypted in transit and deleted after 24 hours</span>
             </div>
           </div>
 
@@ -61,12 +66,12 @@ export default function HomePage() {
           <h1 className="text-4xl font-black tracking-tight text-white sm:text-6xl lg:text-7xl max-w-4xl mx-auto leading-[1.12]">
             Turn Long Videos Into{' '}
             <span className="bg-gradient-to-r from-brand-400 via-indigo-300 to-accent-cyan bg-clip-text text-transparent">
-              Powerful Shorts — Locally.
+              Powerful Shorts — With Cloud AI.
             </span>
           </h1>
 
           <p className="mx-auto max-w-2xl text-base sm:text-lg text-slate-200 leading-relaxed font-normal">
-            AI-assisted clipping, captions, reframing and editing directly in your browser. No uploads. No API keys.
+            Upload your video. Our remote AI workers analyze, clip, reframe, and caption. Download your finished Shorts.
           </p>
 
           {/* Primary Action Buttons */}
@@ -89,15 +94,15 @@ export default function HomePage() {
             </a>
           </div>
 
-          {/* Privacy Guarantee Pill */}
+          {/* Trust Indicators */}
           <div className="pt-4 flex items-center justify-center gap-6 text-xs text-slate-300">
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-              WebCodecs 60 FPS Engine
+              Cloud Media Workers
             </span>
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-              Zero Cloud Storage
+              Secure Remote Processing
             </span>
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
@@ -113,12 +118,12 @@ export default function HomePage() {
       {/* 3. HOW IT WORKS SECTION — below-fold, use content-visibility for paint skip */}
       <section id="how-it-works" className="cv-auto mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 space-y-12">
         <div className="text-center space-y-3">
-          <span className="text-xs font-bold uppercase tracking-wider text-brand-400">Browser Pipeline</span>
+          <span className="text-xs font-bold uppercase tracking-wider text-brand-400">Cloud Pipeline</span>
           <h2 className="text-3xl sm:text-4xl font-black text-white tracking-tight">
-            How Client-Side Video AI Works
+            How Cloud Video AI Works
           </h2>
           <p className="text-slate-300 max-w-2xl mx-auto text-sm sm:text-base">
-            No servers, no queues, no privacy risks. Every step executes inside your browser tab.
+            Your video is uploaded securely, processed by remote AI workers, and your finished Shorts are ready to download.
           </p>
         </div>
 
@@ -127,9 +132,9 @@ export default function HomePage() {
             <div className="h-10 w-10 rounded-xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center text-brand-400 font-bold">
               1
             </div>
-            <h3 className="text-lg font-bold text-white">Select Local File</h3>
+            <h3 className="text-lg font-bold text-white">Upload Your Video</h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Read metadata locally via HTML5 File API and Mediabunny. Your video is never sent over any network.
+              Upload your video securely via TLS. Files are encrypted in transit and stored temporarily on our cloud workers.
             </p>
           </div>
 
@@ -157,9 +162,9 @@ export default function HomePage() {
             <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 font-bold">
               4
             </div>
-            <h3 className="text-lg font-bold text-white">60 FPS Hardware Render</h3>
+            <h3 className="text-lg font-bold text-white">Download Ready Shorts</h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              GPU-accelerated WebCodecs encode frames directly to MP4 and stream output directly to your disk.
+              GPU-accelerated cloud encode outputs 60 FPS MP4 files ready to download. Source files deleted after 24 hours.
             </p>
           </div>
         </div>
@@ -190,22 +195,23 @@ export default function HomePage() {
 
       {/* 5. PRIVACY CALLOUT BANNER — below-fold */}
       <section className="cv-auto mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="rounded-3xl border border-emerald-500/20 bg-gradient-to-r from-emerald-950/40 to-slate-900/80 p-8 sm:p-12 text-center space-y-4">
-          <div className="h-12 w-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 mx-auto">
+        <div className="rounded-3xl border border-brand-500/20 bg-gradient-to-r from-brand-950/40 to-slate-900/80 p-8 sm:p-12 text-center space-y-4">
+          <div className="h-12 w-12 rounded-2xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center text-brand-400 mx-auto">
             <ShieldCheck className="h-6 w-6" />
           </div>
           <h2 className="text-2xl sm:text-3xl font-extrabold text-white">
-            Your Videos Never Touch Our Servers
+            Your Data Is Protected
           </h2>
           <p className="text-slate-200 max-w-2xl mx-auto text-sm sm:text-base leading-relaxed">
-            Unlike other video editors, Local AI Shorts Studio runs entirely in your browser using modern WebCodecs and local AI. No cloud storage, no account registration, no telemetry on your media.
+            Your uploaded videos are processed on our secure cloud workers. All uploads are encrypted in transit using TLS.
+            Source files are automatically deleted after 24 hours. We do not sell or share your video data.
           </p>
           <div className="pt-2">
             <Link
               href="/privacy"
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-400 hover:text-emerald-300"
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-400 hover:text-brand-300"
             >
-              Read our full Privacy Manifesto <ArrowRight className="h-3.5 w-3.5" />
+              Read our full Privacy Policy <ArrowRight className="h-3.5 w-3.5" />
             </Link>
           </div>
         </div>

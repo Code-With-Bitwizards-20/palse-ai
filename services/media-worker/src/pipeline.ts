@@ -10,7 +10,7 @@ import {
 } from '@shorts/shared';
 import { getResolutionDimensions, type ResolutionTier } from '@shorts/video-config';
 import { probeVideo, validateRenderOutput } from './ffprobe.js';
-import { runFfmpeg } from './ffmpeg.js';
+import { runFfmpeg, detectedEncoder } from './ffmpeg.js';
 import { buildReframeFilter } from './reframe.js';
 import {
   generateAssSubtitles,
@@ -245,6 +245,17 @@ export async function runMediaPipeline(options: PipelineOptions): Promise<Pipeli
 
     let ffmpegRenderArgs: string[];
 
+    // Build encoder-specific codec args based on detected hardware
+    const encoderName = detectedEncoder.encoderName;
+    const encoderArgs: string[] = (() => {
+      switch (encoderName) {
+        case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr'];
+        case 'h264_qsv':   return ['-c:v', 'h264_qsv',   '-preset', 'faster'];
+        case 'h264_amf':   return ['-c:v', 'h264_amf',   '-preset', 'fast'];
+        default:           return ['-c:v', 'libx264',    '-preset', 'veryfast'];
+      }
+    })();
+
     if (reframe.isComplexFilter) {
       // Complex filter_complex path (e.g. blurred-background with split/overlay)
       // Append subtitle and fps filters to the final output of the complex graph
@@ -263,8 +274,7 @@ export async function runMediaPipeline(options: PipelineOptions): Promise<Pipeli
         '-to', boundary.endTime.toString(),
         '-i', sourceFilePath,
         '-filter_complex', fullComplexFilter,
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        ...encoderArgs,
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
         '-af', 'loudnorm=I=-14:LRA=7:tp=-1.5',
@@ -287,8 +297,7 @@ export async function runMediaPipeline(options: PipelineOptions): Promise<Pipeli
         '-to', boundary.endTime.toString(),
         '-i', sourceFilePath,
         '-vf', videoFilterString,
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        ...encoderArgs,
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
         '-af', 'loudnorm=I=-14:LRA=7:tp=-1.5',
@@ -310,8 +319,7 @@ export async function runMediaPipeline(options: PipelineOptions): Promise<Pipeli
         '-to', boundary.endTime.toString(),
         '-i', sourceFilePath,
         '-vf', `${reframe.filterComplex},fps=fps=60:round=near`,
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        ...encoderArgs,
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
         '-c:a', 'aac',

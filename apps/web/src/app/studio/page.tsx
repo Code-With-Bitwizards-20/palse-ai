@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Upload,
   Video,
@@ -9,8 +9,7 @@ import {
   Play,
   Pause,
   Download,
-  ShieldCheck,
-  Cpu,
+  Cloud,
   Layers,
   FileText,
   AlertTriangle,
@@ -19,7 +18,6 @@ import {
   Settings,
   Flame,
   Clock,
-  HardDrive,
   RefreshCw,
   ExternalLink,
   ChevronRight,
@@ -34,13 +32,14 @@ import {
   Bot,
   Scissors,
   Wand2,
+  Link2,
+  ServerCrash,
+  RotateCcw,
+  ArrowRight,
+  CircleCheck,
 } from 'lucide-react';
 import { calculateClips, RemainderStrategy } from '@shorts/shared';
 import { PLATFORM_PRESETS, PlatformId } from '@shorts/platform-presets';
-import {
-  detectDeviceCapabilities,
-  DeviceCapabilities,
-} from '@/lib/deviceDetector';
 import {
   generateHooks,
   generateLocalShortFilename,
@@ -56,14 +55,6 @@ import {
   exportToSrt,
   exportToVtt,
 } from '@/lib/subtitles';
-import {
-  renderShortToMp4,
-  renderFrameToCanvas,
-  clearAudioCache,
-  ReframeStrategy,
-  EditingStyle,
-  RenderResult,
-} from '@/lib/videoEngine';
 import { APP_CONFIG } from '@/config/app';
 import { DualSourceDropzone } from '@/features/ingestion/components/DualSourceDropzone';
 import { detectCandidateHighlights, CandidateClip } from '@/lib/highlightDetector';
@@ -74,10 +65,18 @@ import {
 import { FindMomentsModal } from '@/components/FindMomentsModal';
 import { ClipEditorModal } from '@/components/ClipEditorModal';
 import { clientProjectStore, ClientProject } from '@/lib/indexedDBStore';
-import { transcribeVideoAudio, isBrowserSpeechRecognitionSupported } from '@/lib/speechEngine';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 export type ClippingEngineMode = 'ai-clipping' | 'gaming-clipping' | 'find-moments' | 'math-split';
 
+/** Reframe strategies sent to the cloud worker */
+export type ReframeStrategy = 'AI Smart' | 'Gameplay' | 'Face Focus' | 'Center' | 'Fit + Blur';
+
+/** Editing style (kept for clip plan UI) */
+export type EditingStyle = 'Clean' | 'Balanced' | 'High Energy' | 'Extreme';
+
+/** A planned short in the pre-submit clip plan */
 interface ShortItem {
   id: string;
   index: number;
@@ -88,35 +87,76 @@ interface ShortItem {
   topic: string;
   hook: GeneratedHook;
   engagement: EngagementBreakdown;
-  status: 'idle' | 'rendering' | 'ready' | 'error';
-  renderProgress?: number;
-  stageText?: string;
-  outputBlob?: Blob;
-  outputUrl?: string;
-  streamedToDisk?: boolean;
+  status: 'idle' | 'queued' | 'ready' | 'error';
   score?: number;
   explanation?: string;
 }
 
-export default function StudioPage() {
-  // Device Capabilities State
-  const [deviceCaps, setDeviceCaps] = useState<DeviceCapabilities | null>(null);
-  const [detectingCaps, setDetectingCaps] = useState(true);
+/** A completed cloud-rendered clip returned in job results */
+interface CompletedClip {
+  clipIndex: number;
+  mainTopic: string;
+  startTime: number;
+  endTime: number;
+  duration: number;
+  engagementPotential: number;
+  selectedHook?: { text: string };
+  cleanFilename: string;
+  mp4File?: string;
+  srtFile?: string;
+  vttFile?: string;
+}
 
-  // Video Source State
+// Upload result from /api/upload proxy
+interface UploadResult {
+  filePath: string;
+  jobId: string;
+  originalName?: string;
+  sizeBytes?: number;
+}
+
+// Phase progression
+type StudioPhase = 'source' | 'options' | 'processing' | 'results';
+
+// ─── Source Tab ───────────────────────────────────────────────────────────────
+
+type SourceTab = 'upload' | 'url';
+
+// ─── Main Component ──────────────────────────────────────────────────────────
+
+export default function StudioPage() {
+  // ── Phase ──
+  const [phase, setPhase] = useState<StudioPhase>('source');
+
+  // ── Source Tab ──
+  const [sourceTab, setSourceTab] = useState<SourceTab>('upload');
+
+  // ── Upload / URL result ──
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [urlImportValue, setUrlImportValue] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  // ── Job state ──
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [completedClips, setCompletedClips] = useState<CompletedClip[]>([]);
+  const [jobStatus, setJobStatus] = useState<string>('');
+  const [jobStage, setJobStage] = useState<string>('');
+  const [jobPercent, setJobPercent] = useState<number>(0);
+  const [workerError, setWorkerError] = useState<string | null>(null);
+
+  // ── Video source info (populated after upload for local preview plan) ──
   const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoSrc, setVideoSrc] = useState<string | null>(null);
-  const [videoDuration, setVideoDuration] = useState<number>(0);
+  const [videoDuration, setVideoDuration] = useState<number>(120); // default estimate
   const [videoWidth, setVideoWidth] = useState<number>(1920);
   const [videoHeight, setVideoHeight] = useState<number>(1080);
   const [videoFps, setVideoFps] = useState<number>(30);
-  const [copyrightConfirmed, setCopyrightConfirmed] = useState(true);
 
-  // Clipping Engine Mode
+  // ── Clipping mode ──
   const [clippingMode, setClippingMode] = useState<ClippingEngineMode>('ai-clipping');
   const [gamingProfile, setGamingProfile] = useState<GamingProfile>('GTA VI Gameplay');
 
-  // Configuration State
+  // ── Options ──
   const [clipDuration, setClipDuration] = useState<number>(30);
   const [clipCountTarget, setClipCountTarget] = useState<number>(5);
   const [remainderStrategy, setRemainderStrategy] = useState<RemainderStrategy>('ignore');
@@ -125,120 +165,56 @@ export default function StudioPage() {
   const [editingStyle, setEditingStyle] = useState<EditingStyle>('Balanced');
   const [resolutionTier, setResolutionTier] = useState<'1080p' | '2k' | '4k'>('1080p');
   const [subtitleThemeId, setSubtitleThemeId] = useState<SubtitleThemeId>('creator');
-  const [showSafeZones, setShowSafeZones] = useState(true);
+  const [qualityTier, setQualityTier] = useState<'standard' | 'high' | 'max'>('high');
 
-  // Subtitles / Cues
+  // ── Subtitle cues (AI-generated preview) ──
   const [subtitles, setSubtitles] = useState<SubtitleCue[]>([
     { id: 'c1', startTime: 0, endTime: 3.2, text: 'This secret changes everything about creating shorts.' },
     { id: 'c2', startTime: 3.2, endTime: 7.0, text: 'You no longer need expensive cloud servers or subscriptions.' },
-    { id: 'c3', startTime: 7.0, endTime: 12.0, text: 'Everything runs 100% directly in your browser with WebCodecs.' },
-    { id: 'c4', startTime: 12.0, endTime: 18.0, text: 'Your video never leaves your computer, ensuring absolute privacy.' },
+    { id: 'c3', startTime: 7.0, endTime: 12.0, text: 'Everything processes in the cloud with hardware acceleration.' },
+    { id: 'c4', startTime: 12.0, endTime: 18.0, text: 'Download your clips anywhere, on any device.' },
   ]);
-  const [isTranscribing, setIsTranscribing] = useState(false);
 
-  // Audio Analysis State
-  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
-  const [audioPeakTimes, setAudioPeakTimes] = useState<number[]>([]);
-
-  // Generated Shorts Plan
+  // ── Clip plan (heuristic preview before submission) ──
   const [shorts, setShorts] = useState<ShortItem[]>([]);
   const [activeShortIndex, setActiveShortIndex] = useState<number>(0);
 
-  // Interactive Player State
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
+  // ── Audio buffer for peak detection ──
+  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [audioPeakTimes, setAudioPeakTimes] = useState<number[]>([]);
 
-  // Modals & Editors
+  // ── Modals ──
   const [isFindMomentsOpen, setIsFindMomentsOpen] = useState(false);
   const [editingClipIndex, setEditingClipIndex] = useState<number | null>(null);
 
-  // Global rendering state
-  const [isBatchRendering, setIsBatchRendering] = useState(false);
-  const isBatchRenderingRef = useRef(false);
-
-  // Inline filename renaming state
+  // ── Inline filename renaming ──
   const [editingFilenameIdx, setEditingFilenameIdx] = useState<number | null>(null);
   const [editingFilenameValue, setEditingFilenameValue] = useState('');
 
-  // 1. Initial Device Capability Detection
-  useEffect(() => {
-    async function initDetector() {
-      setDetectingCaps(true);
-      try {
-        const caps = await detectDeviceCapabilities();
-        setDeviceCaps(caps);
-      } catch (err) {
-        console.error('Capability detection error:', err);
-      } finally {
-        setDetectingCaps(false);
-      }
+  // ── SSE connection ref ──
+  const sseRef = useRef<EventSource | null>(null);
+
+  // ─── Computed ───────────────────────────────────────────────────────────────
+
+  const targetDims = useMemo(() => {
+    switch (resolutionTier) {
+      case '4k':  return { width: 2160, height: 3840, bitrate: 35_000_000 };
+      case '2k':  return { width: 1440, height: 2560, bitrate: 18_000_000 };
+      case '1080p':
+      default:    return { width: 1080, height: 1920, bitrate: 10_000_000 };
     }
-    initDetector();
-  }, []);
+  }, [resolutionTier]);
 
-  // 2. Handle Video File Selection (from Local or Direct URL Ingestion)
-  const loadVideoFile = (file: File) => {
-    clearAudioCache();
-    setVideoFile(file);
-    const url = URL.createObjectURL(file);
-    setVideoSrc(url);
-    setIsPlaying(false);
-    setCurrentTime(0);
+  const currentPlatformPreset = PLATFORM_PRESETS[selectedPlatform] || PLATFORM_PRESETS.universal;
 
-    // Decode audio in browser AudioContext for acoustic highlight detection
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    file
-      .arrayBuffer()
-      .then((ab) => audioCtx.decodeAudioData(ab))
-      .then((decoded) => {
-        setAudioBuffer(decoded);
-        // Compute top audio peaks
-        const chData = decoded.getChannelData(0);
-        const peaks: number[] = [];
-        const win = Math.floor(decoded.sampleRate * 0.5);
-        for (let i = 0; i < chData.length; i += win) {
-          let sum = 0;
-          for (let j = 0; j < win; j += 4) {
-            const v = chData[i + j] || 0;
-            sum += v * v;
-          }
-          const rms = Math.sqrt(sum / (win / 4));
-          if (rms > 0.6) {
-            peaks.push(Math.round((i / decoded.sampleRate) * 10) / 10);
-          }
-        }
-        setAudioPeakTimes(peaks);
-      })
-      .catch((e) => {
-        console.warn('Could not pre-decode audio for highlight detection (video may lack audio):', e);
-      });
-  };
+  // ─── Clip Plan Generation (heuristic preview) ──────────────────────────────
 
-  // 3. When Video Metadata Loads
-  const handleLoadedMetadata = () => {
-    if (videoRef.current) {
-      const dur = videoRef.current.duration || 0;
-      const w = videoRef.current.videoWidth || 1920;
-      const h = videoRef.current.videoHeight || 1080;
-      setVideoDuration(dur);
-      setVideoWidth(w);
-      setVideoHeight(h);
-      setVideoFps(30);
-    }
-  };
-
-  // 4. Intelligent Highlights Generation (AI, Gaming, or Math Split)
   useEffect(() => {
     if (videoDuration <= 0) return;
-
     try {
       let items: ShortItem[] = [];
 
       if (clippingMode === 'gaming-clipping') {
-        // Dedicated Gaming Engine (GTA VI, FPS, Reactions)
         const candidates = generateGamingHighlights({
           videoDuration,
           profile: gamingProfile,
@@ -246,7 +222,6 @@ export default function StudioPage() {
           clipCount: clipCountTarget,
           audioBuffer: audioBuffer || undefined,
         });
-
         items = candidates.map((c, i) => ({
           id: `gaming-${i + 1}`,
           index: i + 1,
@@ -275,14 +250,12 @@ export default function StudioPage() {
           explanation: c.explanation,
         }));
       } else if (clippingMode === 'ai-clipping') {
-        // Acoustic & Highlight Engine
         const candidates = detectCandidateHighlights({
           videoDuration,
           targetDuration: clipDuration,
           clipCount: clipCountTarget,
           audioBuffer: audioBuffer || undefined,
         });
-
         items = candidates.map((c, i) => ({
           id: `ai-${i + 1}`,
           index: i + 1,
@@ -311,7 +284,6 @@ export default function StudioPage() {
           explanation: c.explanation,
         }));
       } else {
-        // Fallback: Exact mathematical interval splitter
         const result = calculateClips(videoDuration, clipDuration, remainderStrategy);
         items = result.clips.map((clip) => {
           const dummyTranscript = `Clip ${clip.index}: Key takeaways from ${clip.startTime}s to ${clip.endTime}s.`;
@@ -319,7 +291,6 @@ export default function StudioPage() {
           const primaryHook = hooks[0];
           const engagement = evaluateEngagementPotential(dummyTranscript, clip.duration, true);
           const filename = generateLocalShortFilename(dummyTranscript, clip.index, clip.duration, resolutionTier, 60);
-
           return {
             id: `short-${clip.index}`,
             index: clip.index,
@@ -337,9 +308,7 @@ export default function StudioPage() {
       }
 
       setShorts(items);
-      if (items.length > 0 && activeShortIndex >= items.length) {
-        setActiveShortIndex(0);
-      }
+      if (items.length > 0 && activeShortIndex >= items.length) setActiveShortIndex(0);
 
       // Persist to IndexedDB
       if (videoFile) {
@@ -373,310 +342,218 @@ export default function StudioPage() {
         });
       }
     } catch (err) {
-      console.error('Error generating clips:', err);
+      console.error('Error generating clip plan:', err);
     }
-  }, [
-    videoDuration,
-    clipDuration,
-    clipCountTarget,
-    clippingMode,
-    gamingProfile,
-    remainderStrategy,
-    resolutionTier,
-    audioBuffer,
-  ]);
+  }, [videoDuration, clipDuration, clipCountTarget, clippingMode, gamingProfile, remainderStrategy, resolutionTier, audioBuffer]);
 
-  // 5. Realtime Interactive Preview Canvas Loop
-  useEffect(() => {
-    let animId: number;
+  // ─── Upload Handler ────────────────────────────────────────────────────────
 
-    const renderLoop = () => {
-      const isExporting = isBatchRenderingRef.current || shorts.some((s) => s.status === 'rendering');
-      const video = videoRef.current;
-      const canvas = previewCanvasRef.current;
-      if (!isExporting && video && canvas && video.readyState >= 2) {
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          const activeShort = shorts[activeShortIndex];
-          const hook = activeShort ? activeShort.hook : undefined;
-          const clipStart = activeShort ? activeShort.startTime : 0;
-          const theme = SUBTITLE_THEMES[subtitleThemeId];
+  const handleFileSelected = useCallback(async (file: File) => {
+    setVideoFile(file);
+    setWorkerError(null);
+    setIsUploading(true);
+    setUploadProgress(0);
 
-          renderFrameToCanvas(
-            ctx,
-            video,
-            canvas.width,
-            canvas.height,
-            reframeStrategy,
-            editingStyle,
-            video.currentTime,
-            clipStart,
-            subtitles,
-            theme,
-            hook
-          );
-        }
+    // Probe duration locally (best effort)
+    const tempUrl = URL.createObjectURL(file);
+    const vid = document.createElement('video');
+    vid.preload = 'metadata';
+    vid.src = tempUrl;
+    await new Promise<void>((res) => {
+      vid.onloadedmetadata = () => {
+        setVideoDuration(vid.duration || 120);
+        setVideoWidth(vid.videoWidth || 1920);
+        setVideoHeight(vid.videoHeight || 1080);
+        URL.revokeObjectURL(tempUrl);
+        res();
+      };
+      vid.onerror = () => { URL.revokeObjectURL(tempUrl); res(); };
+      setTimeout(res, 3000);
+    });
+
+    // Decode audio for peak detection
+    file.arrayBuffer().then((ab) => {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      return ctx.decodeAudioData(ab);
+    }).then((decoded) => {
+      setAudioBuffer(decoded);
+      const chData = decoded.getChannelData(0);
+      const peaks: number[] = [];
+      const win = Math.floor(decoded.sampleRate * 0.5);
+      for (let i = 0; i < chData.length; i += win) {
+        let sum = 0;
+        for (let j = 0; j < win; j += 4) { const v = chData[i + j] || 0; sum += v * v; }
+        const rms = Math.sqrt(sum / (win / 4));
+        if (rms > 0.6) peaks.push(Math.round((i / decoded.sampleRate) * 10) / 10);
       }
-      animId = requestAnimationFrame(renderLoop);
-    };
+      setAudioPeakTimes(peaks);
+    }).catch(() => {});
 
-    animId = requestAnimationFrame(renderLoop);
-    return () => cancelAnimationFrame(animId);
-  }, [reframeStrategy, editingStyle, subtitleThemeId, subtitles, activeShortIndex, shorts]);
-
-  // Video Play / Pause control with audio playback
-  const togglePlay = () => {
-    if (!videoRef.current) return;
-    if (isPlaying) {
-      videoRef.current.pause();
-      setIsPlaying(false);
-    } else {
-      videoRef.current.muted = isMuted;
-      videoRef.current
-        .play()
-        .then(() => setIsPlaying(true))
-        .catch((err) => {
-          console.warn('Audio playback restricted by browser policy:', err);
-          if (videoRef.current) {
-            videoRef.current.muted = true;
-            setIsMuted(true);
-            videoRef.current.play().then(() => setIsPlaying(true)).catch(console.error);
-          }
-        });
-    }
-  };
-
-  const toggleMute = () => {
-    if (videoRef.current) {
-      const nextMuted = !isMuted;
-      videoRef.current.muted = nextMuted;
-      setIsMuted(nextMuted);
-    }
-  };
-
-  const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
-      const activeShort = shorts[activeShortIndex];
-      if (activeShort && videoRef.current.currentTime >= activeShort.endTime) {
-        videoRef.current.currentTime = activeShort.startTime;
-      }
-    }
-  };
-
-  const jumpToShort = (index: number) => {
-    setActiveShortIndex(index);
-    const short = shorts[index];
-    if (short && videoRef.current) {
-      videoRef.current.currentTime = short.startTime;
-      setCurrentTime(short.startTime);
-    }
-  };
-
-  // Dimensions based on resolution tier
-  const targetDims = useMemo(() => {
-    switch (resolutionTier) {
-      case '4k':
-        return { width: 2160, height: 3840, bitrate: 35_000_000 };
-      case '2k':
-        return { width: 1440, height: 2560, bitrate: 18_000_000 };
-      case '1080p':
-      default:
-        return { width: 1080, height: 1920, bitrate: 10_000_000 };
-    }
-  }, [resolutionTier]);
-
-  // 6. Speech-to-Text Transcription Trigger
-  const handleGenerateCaptions = async () => {
-    if (!videoRef.current) return;
-    setIsTranscribing(true);
+    // Upload to cloud worker via /api/upload proxy
     try {
-      const cues = await transcribeVideoAudio(videoRef.current);
-      setSubtitles(cues);
-    } catch (e) {
-      console.warn('Transcription error:', e);
-    } finally {
-      setIsTranscribing(false);
-    }
-  };
+      const form = new FormData();
+      form.append('file', file);
 
-  // 7. Render Single Short to MP4 with WebCodecs
-  const handleRenderShort = async (shortIndex: number, isBatchMode = false) => {
-    const short = shorts[shortIndex];
-    if (!short || !videoRef.current) return;
-
-    if (!isBatchMode && resolutionTier === '4k' && deviceCaps && !deviceCaps.encode4k60.supported) {
-      const proceed = confirm(
-        '4K rendering may exceed this device\'s browser/GPU capability. 1080p is recommended. Continue?'
-      );
-      if (!proceed) return;
-    }
-
-    setShorts((prev) =>
-      prev.map((s, idx) =>
-        idx === shortIndex ? { ...s, status: 'rendering', renderProgress: 0, stageText: 'Starting hardware encoder...' } : s
-      )
-    );
-
-    let fileHandle: FileSystemFileHandle | undefined = undefined;
-    if (!isBatchMode && typeof window !== 'undefined' && (window as any).showSaveFilePicker) {
-      try {
-        const useStreaming = confirm(
-          `Stream "${short.filename}" directly to your disk to save memory?`
-        );
-        if (useStreaming) {
-          fileHandle = await (window as any).showSaveFilePicker({
-            suggestedName: short.filename,
-            types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }],
-          });
-        }
-      } catch {
-        // Fallback to in-memory Blob
-      }
-    }
-
-    try {
-      const theme = SUBTITLE_THEMES[subtitleThemeId];
-      const devicePerf = (() => {
-        switch (deviceCaps?.performanceLevel) {
-          case 'Excellent': return 'excellent' as const;
-          case 'Good':      return 'good' as const;
-          case 'Limited':   return 'limited' as const;
-          default:          return 'compat' as const;
-        }
-      })();
-
-      const result: RenderResult = await renderShortToMp4({
-        sourceVideo: videoRef.current,
-        sourceFile: videoFile || undefined,
-        startTime: short.startTime,
-        endTime: short.endTime,
-        targetWidth: targetDims.width,
-        targetHeight: targetDims.height,
-        targetFps: 60,
-        bitrate: targetDims.bitrate,
-        reframeStrategy,
-        editingStyle,
-        subtitles,
-        subtitleTheme: theme,
-        hook: short.hook,
-        fileHandle,
-        devicePerf,
-        onProgress: (pct, stage) => {
-          setShorts((prev) =>
-            prev.map((s, idx) =>
-              idx === shortIndex ? { ...s, renderProgress: pct, stageText: stage } : s
-            )
-          );
-        },
+      const xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) setUploadProgress(Math.round((e.loaded / e.total) * 100));
       });
 
-      const outputUrl = result.blob ? URL.createObjectURL(result.blob) : undefined;
+      const result = await new Promise<UploadResult>((resolve, reject) => {
+        xhr.open('POST', '/api/upload');
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(JSON.parse(xhr.responseText));
+          } else {
+            reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error during upload'));
+        xhr.send(form);
+      });
 
-      setShorts((prev) =>
-        prev.map((s, idx) =>
-          idx === shortIndex
-            ? {
-                ...s,
-                status: 'ready',
-                renderProgress: 100,
-                stageText: 'Ready to download',
-                outputBlob: result.blob,
-                outputUrl,
-                streamedToDisk: result.streamedToDisk,
-              }
-            : s
-        )
-      );
+      setUploadResult(result);
+      setPhase('options');
     } catch (err: any) {
-      console.error('Render error:', err);
-      setShorts((prev) =>
-        prev.map((s, idx) =>
-          idx === shortIndex
-            ? { ...s, status: 'error', stageText: err?.message || 'Rendering failed.' }
-            : s
-        )
-      );
-    }
-  };
-
-  // 8. Batch Render All Shorts Sequentially
-  const handleRenderAll = async () => {
-    if (isBatchRendering || shorts.length === 0) return;
-
-    if (resolutionTier === '4k' && deviceCaps && !deviceCaps.encode4k60.supported) {
-      const proceed = confirm(
-        '4K batch rendering may exceed this device\'s GPU limits. 1080p is recommended. Continue?'
-      );
-      if (!proceed) return;
-    }
-
-    isBatchRenderingRef.current = true;
-    setIsBatchRendering(true);
-
-    try {
-      for (let i = 0; i < shorts.length; i++) {
-        await handleRenderShort(i, true);
-      }
+      setWorkerError(err?.message || 'Upload failed. The cloud worker may be unavailable.');
     } finally {
-      isBatchRenderingRef.current = false;
-      setIsBatchRendering(false);
+      setIsUploading(false);
     }
-  };
+  }, []);
 
-  // 9. Rename Short Filename
-  const handleRenameShort = (idx: number, newName: string) => {
-    const trimmed = newName.trim();
-    if (!trimmed) {
-      setEditingFilenameIdx(null);
-      setEditingFilenameValue('');
-      return;
+  // ─── URL Import Handler ────────────────────────────────────────────────────
+
+  const handleUrlImport = useCallback(async () => {
+    if (!urlImportValue.trim()) return;
+    setWorkerError(null);
+    setIsUploading(true);
+    try {
+      const res = await fetch('/api/upload/url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: urlImportValue.trim() }),
+      });
+      if (!res.ok) throw new Error(`URL import failed: ${res.status} ${res.statusText}`);
+      const data: UploadResult = await res.json();
+      setUploadResult(data);
+      setPhase('options');
+    } catch (err: any) {
+      setWorkerError(err?.message || 'URL import failed. The cloud worker may be unavailable.');
+    } finally {
+      setIsUploading(false);
     }
-    const final = trimmed.endsWith('.mp4') ? trimmed : `${trimmed}.mp4`;
-    setShorts((prev) => prev.map((s, i) => (i === idx ? { ...s, filename: final } : s)));
-    setEditingFilenameIdx(null);
-    setEditingFilenameValue('');
-  };
+  }, [urlImportValue]);
 
-  // 10. Download Rendered MP4
-  const handleDownload = (short: ShortItem) => {
-    if (short.outputUrl) {
-      const a = document.createElement('a');
-      a.href = short.outputUrl;
-      a.download = short.filename;
-      a.click();
+  // ─── Submit Job ────────────────────────────────────────────────────────────
+
+  const submitJob = useCallback(async () => {
+    if (!uploadResult) return;
+    setWorkerError(null);
+    try {
+      const res = await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceFilePath: uploadResult.filePath,
+          projectId: crypto.randomUUID(),
+          selectedDurationSeconds: clipDuration,
+          reframeStrategy,
+          subtitleThemeId,
+          qualityTier,
+          enable60Fps: true,
+          enableCaptions: true,
+          clippingMode,
+          clipCountTarget,
+          remainderStrategy,
+          selectedPlatform,
+        }),
+      });
+      const data = await res.json();
+      if (data.jobId) {
+        setActiveJobId(data.jobId);
+        setPhase('processing');
+        connectSSE(data.jobId);
+      } else {
+        setWorkerError(data.error || 'Failed to submit job. The cloud worker may be unavailable.');
+      }
+    } catch (err: any) {
+      setWorkerError(err?.message || 'Cloud worker is currently unavailable. Please try again in a few minutes.');
     }
-  };
+  }, [uploadResult, clipDuration, reframeStrategy, subtitleThemeId, qualityTier, clippingMode, clipCountTarget, remainderStrategy, selectedPlatform]);
 
-  // 11. Download Subtitles
+  // ─── SSE Connection ────────────────────────────────────────────────────────
+
+  const connectSSE = useCallback((jobId: string) => {
+    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+
+    const es = new EventSource(`/api/jobs/${jobId}/events`);
+    sseRef.current = es;
+
+    es.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        setJobStatus(event.status || '');
+        setJobStage(event.stage || '');
+        setJobPercent(event.percent ?? 0);
+        if (event.status === 'COMPLETED') {
+          if (event.clips) setCompletedClips(event.clips);
+          setPhase('results');
+          es.close();
+          sseRef.current = null;
+        } else if (event.status === 'FAILED' || event.status === 'CANCELLED') {
+          setWorkerError(event.error || `Job ${event.status.toLowerCase()}.`);
+          es.close();
+          sseRef.current = null;
+        }
+      } catch {}
+    };
+
+    es.onerror = () => {
+      // Try to fetch final job state
+      fetch(`/api/jobs/${jobId}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.status === 'COMPLETED') {
+            if (d.clips) setCompletedClips(d.clips);
+            setPhase('results');
+          } else if (d.status === 'FAILED' || d.status === 'CANCELLED') {
+            setWorkerError(d.error || `Job ${d.status?.toLowerCase() || 'failed'}.`);
+          }
+        })
+        .catch(() => setWorkerError('Lost connection to cloud worker. Your job may still be running.'));
+      es.close();
+      sseRef.current = null;
+    };
+  }, []);
+
+  // Cleanup SSE on unmount
+  useEffect(() => {
+    return () => { sseRef.current?.close(); };
+  }, []);
+
+  // ─── Subtitle downloads ────────────────────────────────────────────────────
+
   const handleDownloadSubtitles = (format: 'srt' | 'vtt') => {
     const text = format === 'srt' ? exportToSrt(subtitles) : exportToVtt(subtitles);
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = `subtitles.${format}`;
-    a.click();
+    a.href = url; a.download = `subtitles.${format}`; a.click();
     URL.revokeObjectURL(url);
   };
 
-  // 12. Clear Temporary Buffers
-  const handleClearTemporaryFiles = () => {
-    shorts.forEach((s) => {
-      if (s.outputUrl) URL.revokeObjectURL(s.outputUrl);
-    });
-    setShorts((prev) =>
-      prev.map((s) => ({
-        ...s,
-        status: 'idle',
-        outputBlob: undefined,
-        outputUrl: undefined,
-      }))
-    );
-    alert('Temporary browser video buffers released.');
+  // ─── Rename ────────────────────────────────────────────────────────────────
+
+  const handleRenameShort = (idx: number, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) { setEditingFilenameIdx(null); setEditingFilenameValue(''); return; }
+    const final = trimmed.endsWith('.mp4') ? trimmed : `${trimmed}.mp4`;
+    setShorts((prev) => prev.map((s, i) => (i === idx ? { ...s, filename: final } : s)));
+    setEditingFilenameIdx(null); setEditingFilenameValue('');
   };
 
-  // Handle Find Moments Selection
+  // ─── Find Moments ──────────────────────────────────────────────────────────
+
   const handleMomentFound = (momentClip: CandidateClip) => {
     const newItem: ShortItem = {
       id: momentClip.id,
@@ -686,12 +563,7 @@ export default function StudioPage() {
       duration: momentClip.duration,
       filename: generateLocalShortFilename(momentClip.title, shorts.length + 1, momentClip.duration, resolutionTier, 60),
       topic: momentClip.title,
-      hook: {
-        id: `moment-hook-${Date.now()}`,
-        category: 'Surprise',
-        text: momentClip.suggestedHookText,
-        suggestedDurationSeconds: 3.0,
-      },
+      hook: { id: `moment-hook-${Date.now()}`, category: 'Surprise', text: momentClip.suggestedHookText, suggestedDurationSeconds: 3.0 },
       engagement: {
         score: momentClip.score,
         rating: 'Exceptional',
@@ -705,28 +577,86 @@ export default function StudioPage() {
       score: momentClip.score,
       explanation: momentClip.explanation,
     };
-
     setShorts((prev) => [newItem, ...prev]);
     setActiveShortIndex(0);
-    if (videoRef.current) {
-      videoRef.current.currentTime = momentClip.startTime;
-    }
   };
 
-  const currentPlatformPreset = PLATFORM_PRESETS[selectedPlatform] || PLATFORM_PRESETS.universal;
+  // ─── Reset to start ────────────────────────────────────────────────────────
+
+  const resetStudio = () => {
+    sseRef.current?.close();
+    sseRef.current = null;
+    setPhase('source');
+    setUploadResult(null);
+    setActiveJobId(null);
+    setCompletedClips([]);
+    setWorkerError(null);
+    setJobStatus('');
+    setJobStage('');
+    setJobPercent(0);
+    setVideoFile(null);
+    setIsUploading(false);
+    setUploadProgress(0);
+    setUrlImportValue('');
+  };
+
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* 1. Privacy Banner */}
-      <div className="bg-emerald-950/60 border-b border-emerald-500/20 px-4 py-2 text-center text-xs sm:text-sm text-emerald-300 flex items-center justify-center gap-2">
-        <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+
+      {/* Cloud Processing Banner */}
+      <div className="bg-sky-950/60 border-b border-sky-500/20 px-4 py-2 text-center text-xs sm:text-sm text-sky-300 flex items-center justify-center gap-2">
+        <Cloud className="h-4 w-4 text-sky-400 shrink-0" />
         <span>
-          <strong>Private by design</strong> — your videos are processed locally in your browser with WebCodecs. Zero cloud uploads, zero API fees.
+          <strong>Cloud-accelerated processing</strong> — videos are rendered server-side with GPU hardware encoders. No local CPU load.
         </span>
       </div>
 
-      {/* Main Studio Container */}
+      {/* Worker Unavailable Error Banner */}
+      {workerError && (
+        <div className="bg-red-950/70 border-b border-red-500/40 px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <ServerCrash className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-bold text-red-200">Cloud worker is currently unavailable.</p>
+              <p className="text-xs text-red-300 mt-0.5">
+                {workerError} Your video has NOT been processed on your device.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {phase === 'processing' && activeJobId && (
+              <button
+                onClick={() => connectSSE(activeJobId)}
+                className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-300 hover:bg-sky-500/30 transition-all"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reconnect
+              </button>
+            )}
+            {(phase === 'source' || phase === 'options') && (
+              <button
+                onClick={phase === 'options' ? submitJob : undefined}
+                className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 transition-all"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            )}
+            <button
+              onClick={() => setWorkerError(null)}
+              className="text-xs text-slate-400 hover:text-white px-2"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main Container */}
       <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+
         {/* Header & Mode Switcher */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-5">
           <div>
@@ -735,16 +665,17 @@ export default function StudioPage() {
                 PulseCut AI 2.5
               </span>
               <span className="text-xs text-slate-400">• By Code With Bitwizards</span>
+              <span className="rounded bg-sky-500/10 border border-sky-500/20 px-1.5 py-0.5 text-[10px] font-bold text-sky-400 uppercase tracking-wider">Cloud</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white mt-1">
               Intelligent AI Clipping Studio
             </h1>
             <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
-              Dual-source video import, GTA VI gaming detection, 12 kinetic subtitle themes, and 60 FPS hardware MP4 export.
+              Cloud upload → GPU rendering → instant download. GTA VI gaming detection, 12 kinetic subtitle themes, 60 FPS.
             </p>
           </div>
 
-          {/* Engine Mode Switcher Bar */}
+          {/* Engine Mode Switcher */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setClippingMode('ai-clipping')}
@@ -780,59 +711,141 @@ export default function StudioPage() {
           </div>
         </div>
 
-        {/* Video Ingestion Area (When no video loaded yet) */}
-        {!videoSrc && (
-          <div className="space-y-4">
-            <DualSourceDropzone onVideoSelected={(file) => loadVideoFile(file)} />
-          </div>
-        )}
+        {/* ── PHASE INDICATOR ── */}
+        <div className="flex items-center gap-1 text-xs font-semibold">
+          {(['source', 'options', 'processing', 'results'] as StudioPhase[]).map((p, i) => {
+            const labels: Record<StudioPhase, string> = { source: '1. Source', options: '2. Options', processing: '3. Processing', results: '4. Results' };
+            const done = ['source', 'options', 'processing', 'results'].indexOf(phase) > i;
+            const active = phase === p;
+            return (
+              <React.Fragment key={p}>
+                <span className={`px-2.5 py-1 rounded-lg transition-all ${active ? 'bg-cyan-500 text-slate-950' : done ? 'bg-slate-800 text-emerald-400' : 'bg-slate-900 text-slate-500'}`}>
+                  {done && <CircleCheck className="inline h-3 w-3 mr-1" />}
+                  {labels[p]}
+                </span>
+                {i < 3 && <ChevronRight className="h-3 w-3 text-slate-700" />}
+              </React.Fragment>
+            );
+          })}
+          {phase !== 'source' && (
+            <button onClick={resetStudio} className="ml-auto text-slate-500 hover:text-slate-300 text-[11px] flex items-center gap-1 transition-colors">
+              <RotateCcw className="h-3 w-3" /> Start over
+            </button>
+          )}
+        </div>
 
-        {/* Loaded Video Info Bar */}
-        {videoSrc && videoFile && (
-          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 backdrop-blur-md">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500/10 text-cyan-400">
-                <Video className="h-5 w-5" />
+        {/* ════════════════════════════════════════════════════════════════
+            PHASE 1: SOURCE SELECTION
+            ════════════════════════════════════════════════════════════════ */}
+        {phase === 'source' && (
+          <div className="space-y-6">
+            {/* Tab switcher */}
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-1">
+              <button
+                onClick={() => setSourceTab('upload')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-t-lg transition-all border-b-2 ${
+                  sourceTab === 'upload'
+                    ? 'border-cyan-400 text-cyan-300'
+                    : 'border-transparent text-slate-400 hover:text-white'
+                }`}
+              >
+                <Upload className="h-4 w-4" />
+                Upload File
+              </button>
+              <button
+                onClick={() => setSourceTab('url')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-t-lg transition-all border-b-2 ${
+                  sourceTab === 'url'
+                    ? 'border-cyan-400 text-cyan-300'
+                    : 'border-transparent text-slate-400 hover:text-white'
+                }`}
+              >
+                <Link2 className="h-4 w-4" />
+                Import from URL
+              </button>
+            </div>
+
+            {sourceTab === 'upload' ? (
+              <div className="space-y-4">
+                {/* Upload area — wired to cloud */}
+                {isUploading ? (
+                  <div className="border-2 border-dashed border-cyan-500/40 rounded-2xl p-10 flex flex-col items-center justify-center gap-4 bg-slate-900/50">
+                    <Cloud className="h-12 w-12 text-cyan-400 animate-pulse" />
+                    <div className="text-center">
+                      <p className="font-semibold text-white">Uploading to cloud…</p>
+                      <p className="text-xs text-slate-400 mt-1">{videoFile?.name}</p>
+                    </div>
+                    <div className="w-64 h-2 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-cyan-400 transition-all duration-200"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-cyan-400 font-mono">{uploadProgress}%</span>
+                  </div>
+                ) : (
+                  <DualSourceDropzone
+                    onVideoSelected={handleFileSelected}
+                  />
+                )}
               </div>
-              <div>
-                <p className="font-bold text-sm text-white truncate max-w-sm sm:max-w-md">
-                  {videoFile.name}
-                </p>
+            ) : (
+              /* URL Import */
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-4">
+                <div className="flex items-center gap-2 text-sm font-bold text-slate-200">
+                  <Link2 className="h-5 w-5 text-cyan-400" />
+                  Import Video from URL
+                </div>
                 <p className="text-xs text-slate-400">
-                  {Math.round(videoDuration)}s duration • {videoWidth}×{videoHeight} •{' '}
-                  {(videoFile.size / (1024 * 1024)).toFixed(1)} MB • {videoFps} FPS
+                  Paste a direct video URL (MP4, MOV, etc.) or a supported platform link. The cloud worker will fetch and process it.
                 </p>
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={urlImportValue}
+                    onChange={(e) => setUrlImportValue(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleUrlImport()}
+                    placeholder="https://example.com/video.mp4"
+                    className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={handleUrlImport}
+                    disabled={isUploading || !urlImportValue.trim()}
+                    className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-bold text-sm transition-all"
+                  >
+                    {isUploading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+                    Import
+                  </button>
+                </div>
               </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsFindMomentsOpen(true)}
-                className="flex items-center gap-1.5 rounded-xl border border-purple-500/40 bg-purple-500/10 px-3.5 py-2 text-xs font-semibold text-purple-300 hover:bg-purple-500/20 transition-colors"
-              >
-                <Search className="h-3.5 w-3.5" />
-                Find Moments
-              </button>
-              <button
-                onClick={() => {
-                  setVideoSrc(null);
-                  setVideoFile(null);
-                  setShorts([]);
-                }}
-                className="rounded-xl border border-slate-700 hover:bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-300 transition-colors"
-              >
-                Change Video
-              </button>
-            </div>
+            )}
           </div>
         )}
 
-        {/* Studio Grid: Left Controls | Center Preview | Right Cards */}
-        {videoSrc && (
+        {/* ════════════════════════════════════════════════════════════════
+            PHASE 2: JOB OPTIONS
+            ════════════════════════════════════════════════════════════════ */}
+        {phase === 'options' && uploadResult && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* LEFT PANEL: Intelligent Controls (lg:col-span-4) */}
+
+            {/* LEFT: Controls */}
             <div className="lg:col-span-4 space-y-5 bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4 sm:p-5 backdrop-blur-sm">
-              {/* Mode Settings Banner */}
+
+              {/* Source info */}
+              <div className="flex items-center gap-3 bg-slate-900/80 border border-slate-800 rounded-xl p-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-500/10 text-sky-400">
+                  <Cloud className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-sm text-white truncate">{videoFile?.name ?? 'Remote video'}</p>
+                  <p className="text-[11px] text-slate-400">{uploadResult.filePath.split(/[\\/]/).pop()}</p>
+                </div>
+                <button onClick={resetStudio} className="ml-auto text-slate-500 hover:text-red-400 transition-colors shrink-0">
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Clipping mode banner */}
               {clippingMode === 'gaming-clipping' ? (
                 <div className="rounded-xl border border-purple-500/30 bg-purple-500/10 p-3.5 space-y-2">
                   <div className="flex items-center justify-between">
@@ -867,17 +880,14 @@ export default function StudioPage() {
                 </div>
               )}
 
-              {/* Clip Duration & Number of Clips */}
+              {/* Clip Duration */}
               <div className="space-y-3">
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-400">
                     Clip Duration: <span className="text-cyan-400">{clipDuration}s</span>
                   </label>
-                  <span className="text-xs text-slate-500 font-mono">
-                    {shorts.length} Shorts planned
-                  </span>
+                  <span className="text-xs text-slate-500 font-mono">{shorts.length} Shorts planned</span>
                 </div>
-
                 <div className="grid grid-cols-4 gap-1.5">
                   {[15, 30, 45, 60].map((d) => (
                     <button
@@ -893,7 +903,6 @@ export default function StudioPage() {
                     </button>
                   ))}
                 </div>
-
                 <div className="flex items-center justify-between pt-1 text-xs">
                   <span className="text-slate-400">Target Clip Count:</span>
                   <div className="flex items-center gap-1">
@@ -914,7 +923,7 @@ export default function StudioPage() {
                 </div>
               </div>
 
-              {/* Target Platform Preset */}
+              {/* Platform Preset */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
                   Target Platform Preset
@@ -934,7 +943,7 @@ export default function StudioPage() {
                 </select>
               </div>
 
-              {/* Reframing Strategy & Editing Style */}
+              {/* Reframing & Editing Style */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">
@@ -952,7 +961,6 @@ export default function StudioPage() {
                     <option value="Fit + Blur">Fit + Blur BG</option>
                   </select>
                 </div>
-
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">
                     Editing Style
@@ -970,44 +978,23 @@ export default function StudioPage() {
                 </div>
               </div>
 
-              {/* Kinetic Subtitle Theme */}
+              {/* Subtitle Theme */}
               <div>
-                <div className="flex justify-between items-center mb-1">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    Subtitle Typography Theme
-                  </label>
-                  <button
-                    onClick={handleGenerateCaptions}
-                    disabled={isTranscribing}
-                    className="text-[11px] text-cyan-400 hover:text-cyan-300 font-semibold flex items-center gap-1"
-                  >
-                    {isTranscribing ? (
-                      <>
-                        <RefreshCw className="h-3 w-3 animate-spin" />
-                        Transcribing...
-                      </>
-                    ) : (
-                      <>
-                        <Wand2 className="h-3 w-3" />
-                        Auto-Transcribe
-                      </>
-                    )}
-                  </button>
-                </div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Subtitle Typography Theme
+                </label>
                 <select
                   value={subtitleThemeId}
                   onChange={(e) => setSubtitleThemeId(e.target.value as SubtitleThemeId)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-semibold"
                 >
                   {Object.values(SUBTITLE_THEMES).map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
+                    <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
                 </select>
               </div>
 
-              {/* Export Quality Tier */}
+              {/* Export Quality */}
               <div>
                 <div className="flex justify-between items-center mb-1">
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -1034,175 +1021,62 @@ export default function StudioPage() {
                 </div>
               </div>
 
-              {/* Memory Cleanup */}
-              <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
-                <button
-                  onClick={handleClearTemporaryFiles}
-                  className="flex items-center gap-1.5 text-slate-400 hover:text-rose-400 transition-colors"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Clear Temporary Buffers
-                </button>
-                <span className="text-[11px] text-slate-500">IndexedDB Active</span>
+              {/* Quality Tier */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Processing Quality
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['standard', 'high', 'max'] as const).map((qt) => (
+                    <button
+                      key={qt}
+                      onClick={() => setQualityTier(qt)}
+                      className={`py-2 rounded-lg text-xs font-bold capitalize transition-all border ${
+                        qualityTier === qt
+                          ? 'bg-purple-500/20 border-purple-500 text-purple-300'
+                          : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {qt}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
-            {/* CENTER PANEL: Live 9:16 Video Player & Safe Zone Preview (lg:col-span-4) */}
-            <div className="lg:col-span-4 flex flex-col items-center space-y-4 bg-slate-900/40 border border-slate-800/80 rounded-2xl p-4 sm:p-5">
-              <div className="w-full flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Interactive 9:16 Preview
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={toggleMute}
-                    className={`text-xs px-2.5 py-1 rounded-lg border transition-all flex items-center gap-1.5 ${
-                      !isMuted
-                        ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-semibold'
-                        : 'bg-slate-900 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {isMuted ? (
-                      <VolumeX className="h-3.5 w-3.5 text-slate-400" />
-                    ) : (
-                      <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
-                    )}
-                    <span>{isMuted ? 'Muted' : 'Sound ON'}</span>
-                  </button>
-                  <button
-                    onClick={() => setShowSafeZones(!showSafeZones)}
-                    className={`text-xs px-2.5 py-1 rounded-lg border transition-all ${
-                      showSafeZones
-                        ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300 font-semibold'
-                        : 'bg-slate-900 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Safe Zones: {showSafeZones ? 'ON' : 'OFF'}
-                  </button>
-                </div>
-              </div>
-
-              {/* 9:16 Canvas Wrapper */}
-              <div className="relative w-full max-w-[280px] sm:max-w-[320px] aspect-[9/16] bg-black rounded-2xl overflow-hidden shadow-2xl border border-slate-800">
-                <video
-                  ref={videoRef}
-                  src={videoSrc || undefined}
-                  onLoadedMetadata={handleLoadedMetadata}
-                  onTimeUpdate={handleTimeUpdate}
-                  playsInline
-                  muted={isMuted}
-                  className="hidden"
-                />
-
-                <canvas
-                  ref={previewCanvasRef}
-                  width={1080}
-                  height={1920}
-                  className="w-full h-full object-cover"
-                />
-
-                {showSafeZones && (
-                  <div
-                    className="absolute pointer-events-none inset-0 border-2 border-dashed border-red-500/40"
-                    style={{
-                      top: `${currentPlatformPreset.uiSafeZone.topPercent}%`,
-                      bottom: `${currentPlatformPreset.uiSafeZone.bottomPercent}%`,
-                      left: `${currentPlatformPreset.uiSafeZone.leftPercent}%`,
-                      right: `${currentPlatformPreset.uiSafeZone.rightPercent}%`,
-                    }}
-                  >
-                    <div className="absolute top-2 left-2 bg-red-500/80 text-white font-mono text-[9px] px-1 rounded">
-                      UI SAFE ZONE
-                    </div>
-                  </div>
-                )}
-
-                <button
-                  onClick={togglePlay}
-                  className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-all group"
-                >
-                  <div className="h-12 w-12 rounded-full bg-slate-900/80 backdrop-blur-md flex items-center justify-center text-white border border-slate-700 shadow-xl group-hover:scale-110 transition-transform">
-                    {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 ml-0.5" />}
-                  </div>
-                </button>
-              </div>
-
-              {/* Timeline Scrubbing */}
-              <div className="w-full space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-400 font-mono">
-                  <span>{currentTime.toFixed(1)}s</span>
-                  <span>Short #{activeShortIndex + 1} of {shorts.length}</span>
-                  <span>{videoDuration.toFixed(1)}s</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={videoDuration || 100}
-                  step={0.1}
-                  value={currentTime}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    if (videoRef.current) {
-                      videoRef.current.currentTime = val;
-                      setCurrentTime(val);
-                    }
-                  }}
-                  className="w-full accent-cyan-400"
-                />
-              </div>
-
-              {/* Subtitle Downloads */}
-              <div className="w-full bg-slate-950/60 border border-slate-800/80 rounded-xl p-3 text-xs space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="font-semibold text-slate-300">Synchronized Captions</span>
-                  <div className="flex gap-1.5">
-                    <button
-                      onClick={() => handleDownloadSubtitles('srt')}
-                      className="text-[11px] px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded"
-                    >
-                      .SRT
-                    </button>
-                    <button
-                      onClick={() => handleDownloadSubtitles('vtt')}
-                      className="text-[11px] px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded"
-                    >
-                      .VTT
-                    </button>
-                  </div>
-                </div>
-                <p className="text-slate-400 italic line-clamp-2 text-[11px]">
-                  "{subtitles.map((c) => c.text).join(' ')}"
-                </p>
-              </div>
-            </div>
-
-            {/* RIGHT PANEL: Output Short Cards & Batch Render (lg:col-span-4) */}
-            <div className="lg:col-span-4 space-y-4">
+            {/* RIGHT: Clip Plan Preview + Submit */}
+            <div className="lg:col-span-8 space-y-4">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-sm font-bold uppercase tracking-wider text-slate-300">
-                    Generated Shorts ({shorts.length})
+                    Planned Clips ({shorts.length})
                   </h3>
-                  <p className="text-xs text-slate-500">Heuristic Viral Ranking (0–100)</p>
+                  <p className="text-xs text-slate-500">Heuristic preview — cloud AI may adjust boundaries</p>
                 </div>
                 <button
-                  onClick={handleRenderAll}
-                  disabled={isBatchRendering || shorts.length === 0}
-                  className="flex items-center gap-1.5 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 text-white text-xs font-bold px-3 py-1.5 rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-95"
+                  onClick={submitJob}
+                  disabled={!uploadResult}
+                  className="flex items-center gap-1.5 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 text-white text-sm font-bold px-5 py-2.5 rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-95"
                 >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Render All {resolutionTier.toUpperCase()}
+                  <Cloud className="h-4 w-4" />
+                  Submit to Cloud
+                  <ArrowRight className="h-4 w-4" />
                 </button>
               </div>
 
-              {/* Short Cards List */}
-              <div className="space-y-3 max-h-[620px] overflow-y-auto pr-1">
-                {shorts.map((short, idx) => {
+              {/* Clip Plan Cards */}
+              <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
+                {shorts.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-16 text-slate-500">
+                    <Scissors className="h-10 w-10 mb-3 opacity-30" />
+                    <p className="text-sm">Adjust options on the left to generate clip plan</p>
+                  </div>
+                ) : shorts.map((short, idx) => {
                   const isActive = activeShortIndex === idx;
                   return (
                     <div
                       key={short.id}
-                      onClick={() => jumpToShort(idx)}
+                      onClick={() => setActiveShortIndex(idx)}
                       className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
                         isActive
                           ? 'bg-slate-900 border-cyan-500/80 shadow-lg shadow-cyan-500/10 ring-1 ring-cyan-500/40'
@@ -1215,10 +1089,10 @@ export default function StudioPage() {
                             <span className="font-extrabold text-sm text-white">
                               Short #{String(short.index).padStart(2, '0')}
                             </span>
-                            <span className="text-[11px] font-mono px-1.5 py-0.2 bg-slate-800 text-slate-300 rounded">
+                            <span className="text-[11px] font-mono px-1.5 py-0.5 bg-slate-800 text-slate-300 rounded">
                               {short.duration}s
                             </span>
-                            <span className="text-[11px] font-mono px-1.5 py-0.2 bg-cyan-500/10 text-cyan-300 rounded border border-cyan-500/20">
+                            <span className="text-[11px] font-mono px-1.5 py-0.5 bg-cyan-500/10 text-cyan-300 rounded border border-cyan-500/20">
                               9:16 • 60 FPS
                             </span>
                           </div>
@@ -1226,13 +1100,9 @@ export default function StudioPage() {
                             ⚡ {short.hook.text}
                           </div>
                           {short.explanation && (
-                            <p className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">
-                              {short.explanation}
-                            </p>
+                            <p className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">{short.explanation}</p>
                           )}
                         </div>
-
-                        {/* Viral Potential Score Badge */}
                         <div className="flex flex-col items-end shrink-0">
                           <span className="text-[10px] uppercase font-bold text-slate-400">Score</span>
                           <span className="text-xs font-extrabold text-emerald-400 flex items-center gap-0.5">
@@ -1242,86 +1112,271 @@ export default function StudioPage() {
                         </div>
                       </div>
 
-                      {/* Rendering Progress */}
-                      {short.status === 'rendering' && (
-                        <div className="mt-2.5 space-y-1">
-                          <div className="flex justify-between text-[11px] text-cyan-300">
-                            <span>{short.stageText}</span>
-                            <span>{short.renderProgress}%</span>
-                          </div>
-                          <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-cyan-400 transition-all duration-150"
-                              style={{ width: `${short.renderProgress || 0}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Editable Filename + Action Buttons */}
+                      {/* Actions row */}
                       <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 min-w-0" onClick={(e) => e.stopPropagation()}>
-                          <span className="text-[11px] text-slate-400 font-mono truncate" title={short.filename}>
-                            {short.filename}
-                          </span>
+                          {editingFilenameIdx === idx ? (
+                            <input
+                              autoFocus
+                              value={editingFilenameValue}
+                              onChange={(e) => setEditingFilenameValue(e.target.value)}
+                              onBlur={() => handleRenameShort(idx, editingFilenameValue)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') handleRenameShort(idx, editingFilenameValue); if (e.key === 'Escape') { setEditingFilenameIdx(null); setEditingFilenameValue(''); } }}
+                              className="bg-slate-800 border border-cyan-500/40 rounded px-2 py-0.5 text-xs text-white font-mono focus:outline-none w-48"
+                            />
+                          ) : (
+                            <span
+                              className="text-[11px] text-slate-400 font-mono truncate cursor-pointer hover:text-slate-200 transition-colors"
+                              onClick={() => { setEditingFilenameIdx(idx); setEditingFilenameValue(short.filename); }}
+                              title={short.filename}
+                            >
+                              {short.filename}
+                            </span>
+                          )}
                         </div>
-
                         <div className="flex items-center gap-1.5 shrink-0">
-                          {/* Customize / Edit Clip Modal Trigger */}
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditingClipIndex(idx);
-                            }}
+                            onClick={(e) => { e.stopPropagation(); setEditingClipIndex(idx); }}
                             className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                            title="Edit clip boundaries, hook, or reframe"
+                            title="Edit clip boundaries"
                           >
                             <Sliders className="h-3.5 w-3.5" />
                           </button>
-
-                          {short.status !== 'ready' ? (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRenderShort(idx);
-                              }}
-                              disabled={short.status === 'rendering'}
-                              className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition-all"
-                            >
-                              <Cpu className="h-3 w-3 text-cyan-400" />
-                              Render
-                            </button>
-                          ) : (
-                            <div className="flex items-center gap-1.5">
-                              {short.outputUrl && (
-                                <a
-                                  href={short.outputUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/40 transition-all"
-                                >
-                                  <Play className="h-3 w-3" />
-                                  Play
-                                </a>
-                              )}
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleDownload(short);
-                                }}
-                                className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow-md shadow-emerald-500/20 transition-all"
-                              >
-                                <Download className="h-3 w-3" />
-                                MP4
-                              </button>
-                            </div>
-                          )}
+                          <span className="text-[11px] text-slate-500 font-mono">
+                            {short.startTime.toFixed(1)}s – {short.endTime.toFixed(1)}s
+                          </span>
                         </div>
                       </div>
                     </div>
                   );
                 })}
               </div>
+
+              {/* Submit button bottom */}
+              <div className="border-t border-slate-800 pt-4 flex items-center justify-between">
+                <div className="text-xs text-slate-400">
+                  <span className="text-slate-300 font-semibold">{shorts.length} clips</span> • {resolutionTier.toUpperCase()} • {reframeStrategy} • {subtitleThemeId} captions
+                </div>
+                <button
+                  onClick={submitJob}
+                  disabled={!uploadResult}
+                  className="flex items-center gap-1.5 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 text-white text-sm font-bold px-5 py-2.5 rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-95"
+                >
+                  <Cloud className="h-4 w-4" />
+                  Submit to Cloud
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════════════
+            PHASE 3: PROCESSING / JOB MONITOR
+            ════════════════════════════════════════════════════════════════ */}
+        {phase === 'processing' && activeJobId && (
+          <div className="max-w-2xl mx-auto space-y-6 py-8">
+            {/* Job ID */}
+            <div className="text-center space-y-1">
+              <div className="inline-flex items-center gap-2 bg-sky-500/10 border border-sky-500/30 rounded-full px-4 py-1.5 text-xs font-mono text-sky-300">
+                <span className="h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
+                Job ID: {activeJobId}
+              </div>
+            </div>
+
+            {/* Progress card */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 space-y-5 backdrop-blur-sm">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Cloud className="h-5 w-5 text-sky-400 animate-pulse" />
+                  <span className="font-bold text-white">Cloud Processing</span>
+                </div>
+                <span className="text-xs font-mono text-cyan-400">{jobPercent}%</span>
+              </div>
+
+              {/* Progress bar */}
+              <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-cyan-500 to-purple-500 transition-all duration-500 rounded-full"
+                  style={{ width: `${jobPercent}%` }}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 text-xs">
+                <div className="bg-slate-950/60 rounded-xl p-3 space-y-1">
+                  <span className="text-slate-400 uppercase tracking-wider font-semibold text-[10px]">Status</span>
+                  <p className="text-slate-100 font-semibold">{jobStatus || 'Queued'}</p>
+                </div>
+                <div className="bg-slate-950/60 rounded-xl p-3 space-y-1">
+                  <span className="text-slate-400 uppercase tracking-wider font-semibold text-[10px]">Stage</span>
+                  <p className="text-slate-100 font-semibold">{jobStage || 'Waiting for worker…'}</p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1 text-xs text-slate-500">
+                <span>GPU hardware encoder active</span>
+                <button
+                  onClick={() => connectSSE(activeJobId)}
+                  className="flex items-center gap-1 text-sky-400 hover:text-sky-300 transition-colors"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  Reconnect
+                </button>
+              </div>
+            </div>
+
+            {/* What's happening */}
+            <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 text-xs text-slate-400 space-y-2">
+              <p className="font-semibold text-slate-300 uppercase tracking-wider text-[11px]">Cloud Pipeline</p>
+              {[
+                ['Transcription', 'Whisper ASR → subtitle cues generation'],
+                ['Scene detection', 'AI highlight scoring & boundary snapping'],
+                ['Reframing', `${reframeStrategy} 9:16 crop with motion tracking`],
+                ['Encoding', `H.264/NVENC 60 FPS ${resolutionTier.toUpperCase()} MP4`],
+                ['Caption burn-in', `${subtitleThemeId} kinetic subtitle theme`],
+              ].map(([step, desc]) => (
+                <div key={step} className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-slate-600 mt-1.5 shrink-0" />
+                  <span><strong className="text-slate-300">{step}</strong> — {desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════════════
+            PHASE 4: RESULTS
+            ════════════════════════════════════════════════════════════════ */}
+        {phase === 'results' && (
+          <div className="space-y-5">
+            {/* Success banner */}
+            <div className="flex items-center gap-3 bg-emerald-950/60 border border-emerald-500/30 rounded-2xl p-4">
+              <CheckCircle2 className="h-6 w-6 text-emerald-400 shrink-0" />
+              <div>
+                <p className="font-bold text-emerald-200">Processing complete!</p>
+                <p className="text-xs text-emerald-400">{completedClips.length} clips ready • Job {activeJobId}</p>
+              </div>
+              <button onClick={resetStudio} className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-all">
+                <RotateCcw className="h-3.5 w-3.5" />
+                New video
+              </button>
+            </div>
+
+            {/* Clip result cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              {completedClips.map((clip, idx) => (
+                <div
+                  key={idx}
+                  className="bg-slate-900/80 border border-slate-800 rounded-2xl overflow-hidden hover:border-slate-700 transition-colors"
+                >
+                  {/* Thumbnail placeholder */}
+                  <div className="relative bg-slate-800 aspect-[9/16] max-h-64 w-full flex items-center justify-center">
+                    <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-transparent to-transparent" />
+                    <div className="h-14 w-14 rounded-full bg-slate-900/80 backdrop-blur-md flex items-center justify-center border border-slate-700 shadow-xl">
+                      <Play className="h-6 w-6 text-white ml-1" />
+                    </div>
+                    {/* Duration badge */}
+                    <span className="absolute bottom-2 right-2 bg-black/70 text-white text-[11px] font-mono px-1.5 py-0.5 rounded">
+                      {clip.duration?.toFixed(1) ?? '?'}s
+                    </span>
+                    {/* Engagement badge */}
+                    <span className="absolute top-2 right-2 bg-emerald-500/90 text-white text-[11px] font-bold px-2 py-0.5 rounded-full flex items-center gap-0.5">
+                      <Flame className="h-3 w-3" />
+                      {clip.engagementPotential ?? '—'}/100
+                    </span>
+                  </div>
+
+                  {/* Info */}
+                  <div className="p-4 space-y-3">
+                    <div>
+                      <p className="font-bold text-sm text-white line-clamp-1">
+                        Clip #{(clip.clipIndex ?? idx) + 1} — {clip.mainTopic}
+                      </p>
+                      {clip.selectedHook?.text && (
+                        <p className="text-xs text-cyan-300 mt-0.5 line-clamp-2">⚡ {clip.selectedHook.text}</p>
+                      )}
+                      <p className="text-[11px] text-slate-500 font-mono mt-1">
+                        {clip.startTime?.toFixed(1)}s – {clip.endTime?.toFixed(1)}s
+                      </p>
+                    </div>
+
+                    {/* Downloads */}
+                    <div className="space-y-2">
+                      {clip.mp4File && (
+                        <a
+                          href={`/api/downloads/${clip.mp4File}`}
+                          download
+                          className="flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 text-white text-xs font-bold transition-all"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Download MP4
+                        </a>
+                      )}
+
+                      <div className="flex gap-1.5">
+                        {clip.srtFile && (
+                          <a
+                            href={`/api/downloads/${clip.srtFile}`}
+                            download
+                            className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition-all"
+                          >
+                            <FileText className="h-3 w-3" />
+                            .SRT
+                          </a>
+                        )}
+                        {clip.vttFile && (
+                          <a
+                            href={`/api/downloads/${clip.vttFile}`}
+                            download
+                            className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition-all"
+                          >
+                            <FileText className="h-3 w-3" />
+                            .VTT
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Filename */}
+                    <p className="text-[10px] text-slate-600 font-mono truncate" title={clip.cleanFilename}>
+                      {clip.cleanFilename}
+                    </p>
+                  </div>
+                </div>
+              ))}
+
+              {completedClips.length === 0 && (
+                <div className="col-span-full flex flex-col items-center justify-center py-16 text-slate-500">
+                  <Cloud className="h-10 w-10 mb-3 opacity-30" />
+                  <p className="text-sm">No clips were returned by the cloud worker.</p>
+                  <button onClick={resetStudio} className="mt-4 text-xs text-cyan-400 hover:text-cyan-300 transition-colors">
+                    Try again
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Subtitle downloads (from last active short's cues) */}
+            <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3 text-xs space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="font-semibold text-slate-300">Synchronized Captions (Preview)</span>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={() => handleDownloadSubtitles('srt')}
+                    className="text-[11px] px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded"
+                  >
+                    .SRT
+                  </button>
+                  <button
+                    onClick={() => handleDownloadSubtitles('vtt')}
+                    className="text-[11px] px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded"
+                  >
+                    .VTT
+                  </button>
+                </div>
+              </div>
+              <p className="text-slate-400 italic line-clamp-2 text-[11px]">
+                "{subtitles.map((c) => c.text).join(' ')}"
+              </p>
             </div>
           </div>
         )}
@@ -1342,7 +1397,7 @@ export default function StudioPage() {
         <ClipEditorModal
           clip={{
             id: shorts[editingClipIndex].id,
-            projectId: 'local',
+            projectId: uploadResult?.jobId || 'cloud',
             clipIndex: shorts[editingClipIndex].index,
             startTime: shorts[editingClipIndex].startTime,
             endTime: shorts[editingClipIndex].endTime,
@@ -1379,10 +1434,7 @@ export default function StudioPage() {
                       startTime: updated.startTime,
                       endTime: updated.endTime,
                       duration: updated.duration,
-                      hook: {
-                        ...s.hook,
-                        text: updated.selectedHook?.text || s.hook.text,
-                      },
+                      hook: { ...s.hook, text: updated.selectedHook?.text || s.hook.text },
                     }
                   : s
               )

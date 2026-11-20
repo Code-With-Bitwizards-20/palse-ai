@@ -13,6 +13,108 @@ export interface FfmpegProgress {
 
 export type FfmpegProgressCallback = (progress: FfmpegProgress) => void;
 
+// ─────────────────────────── Hardware Detection ───────────────────────────────
+
+export interface HardwareInfo {
+  encoderType: 'GPU' | 'CPU';
+  encoderName: 'h264_nvenc' | 'h264_qsv' | 'h264_amf' | 'libx264';
+  ffmpegVersion: string;
+}
+
+/**
+ * Detect the best available hardware video encoder at startup.
+ * Runs `ffmpeg -encoders` to list available encoders, then validates
+ * each GPU encoder with a 1-frame null test before committing.
+ */
+export async function detectWorkerHardware(): Promise<HardwareInfo> {
+  const ffmpegVersion = await getFfmpegVersion();
+
+  // List available encoders
+  const encodersList = await runCommandText('ffmpeg', ['-encoders', '-hide_banner']);
+
+  // GPU encoder candidates in priority order
+  const gpuCandidates: Array<{ name: HardwareInfo['encoderName']; pattern: RegExp }> = [
+    { name: 'h264_nvenc', pattern: /h264_nvenc/ },
+    { name: 'h264_qsv',   pattern: /h264_qsv/ },
+    { name: 'h264_amf',   pattern: /h264_amf/ },
+  ];
+
+  for (const candidate of gpuCandidates) {
+    if (!candidate.pattern.test(encodersList)) continue;
+    // Validate with a 1-frame null encode
+    const ok = await testEncoder(candidate.name);
+    if (ok) {
+      const result: HardwareInfo = {
+        encoderType: 'GPU',
+        encoderName: candidate.name,
+        ffmpegVersion,
+      };
+      detectedEncoder = result;
+      return result;
+    }
+  }
+
+  // Fall back to CPU libx264
+  const result: HardwareInfo = {
+    encoderType: 'CPU',
+    encoderName: 'libx264',
+    ffmpegVersion,
+  };
+  detectedEncoder = result;
+  return result;
+}
+
+/** Module-level detected encoder — set once at startup by detectWorkerHardware(). */
+export let detectedEncoder: HardwareInfo = {
+  encoderType: 'CPU',
+  encoderName: 'libx264',
+  ffmpegVersion: 'unknown',
+};
+
+// ─────────────────────────── Internal helpers ──────────────────────────────────
+
+async function getFfmpegVersion(): Promise<string> {
+  try {
+    const output = await runCommandText('ffmpeg', ['-version', '-hide_banner']);
+    const match = output.match(/ffmpeg version ([^\s]+)/);
+    return match ? match[1] : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function testEncoder(encoderName: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const args = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-f', 'lavfi',
+      '-i', 'nullsrc=s=256x256:r=1',
+      '-vframes', '1',
+      '-c:v', encoderName,
+      '-f', 'null',
+      '-',
+    ];
+    const child = spawn('ffmpeg', args, { windowsHide: true });
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
+function runCommandText(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { windowsHide: true });
+    let out = '';
+    let err = '';
+    child.stdout?.on('data', (c: Buffer) => { out += c.toString(); });
+    child.stderr?.on('data', (c: Buffer) => { err += c.toString(); });
+    child.on('error', reject);
+    child.on('close', () => resolve(out + err));
+  });
+}
+
+// ─────────────────────────── runFfmpeg ────────────────────────────────────────
+
 /**
  * Execute FFmpeg safely using structured argument array without shell execution.
  * Parses stdout/stderr for deterministic progress updates.

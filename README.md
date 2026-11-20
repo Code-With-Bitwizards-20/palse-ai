@@ -1,28 +1,28 @@
-# PulseCut Local AI — Private Long Video to Shorts Studio
+# PulseCut AI — Long Video to Shorts Studio
 
 <div align="center">
   <img src="apps/web/public/favicon.svg" width="80" alt="PulseCut Logo" />
-  <h3>Turn Long Videos Into Scroll-Stopping Shorts — 100% in Your Browser</h3>
+  <h3>Turn Long Videos Into Scroll-Stopping Shorts — Powered by Cloud AI</h3>
   <p>
     <a href="https://pulsecut-ai.vercel.app" target="_blank"><strong>🌐 Live Demo</strong></a> •
     <a href="https://pulsecut-ai.vercel.app/studio" target="_blank"><strong>🎬 Open Studio</strong></a> •
-    <a href="https://pulsecut-ai.vercel.app/about" target="_blank"><strong>📖 Architecture</strong></a>
+    <a href="DEPLOYMENT.md"><strong>🚀 Deployment Guide</strong></a>
   </p>
   <p>
     <img src="https://img.shields.io/badge/Next.js-15-black?logo=next.js" />
-    <img src="https://img.shields.io/badge/WebCodecs-60%20FPS-blue" />
-    <img src="https://img.shields.io/badge/Privacy-100%25%20Local-green" />
+    <img src="https://img.shields.io/badge/FFmpeg-Cloud%20Worker-orange" />
+    <img src="https://img.shields.io/badge/Docker-Ready-blue?logo=docker" />
     <img src="https://img.shields.io/badge/License-MIT-yellow" />
   </p>
 </div>
 
 ---
 
-## 🚀 What Is PulseCut Local AI?
+## 🚀 What Is PulseCut AI?
 
-**PulseCut Local AI** is a production-quality, fully browser-based studio for converting long horizontal, vertical, or square videos into multiple professionally edited social-media Shorts — with **zero cloud uploads**, **zero API keys**, and **zero privacy risk**.
+**PulseCut AI** is a production-quality studio for converting long horizontal, vertical, or square videos into multiple professionally edited social-media Shorts. Video processing runs in a **cloud media worker** (Docker + FFmpeg), while the Next.js frontend is deployed serverlessly on Vercel — giving you professional codec quality without in-browser limitations.
 
-> Your videos are processed entirely inside your browser using modern WebCodecs API and Web Audio API. Nothing ever leaves your device.
+> Upload your video → the frontend sends it to a dedicated media worker → FFmpeg encodes professional H.264 clips → you download the results.
 
 ---
 
@@ -33,13 +33,31 @@
 | 🎬 **Smart Clip Splitter** | Mathematically exact split into 9:16 Shorts (15s–180s per clip) |
 | 🖼️ **AI Smart Reframe** | 8 strategies: Center, Face Focus, Fit+Blur, Speaker Focus, Gameplay, Manual |
 | 📝 **Kinetic Subtitle Engine** | 12 animated subtitle themes (Karaoke, TikTok Bold, Neon, etc.) |
-| 🔊 **Full Audio Export** | WebCodecs + Web Audio AAC pipeline — sound included in every MP4 |
+| 🔊 **Full Audio Export** | FFmpeg AAC pipeline — sound included in every MP4 |
 | ✏️ **Custom Filenames** | Rename each Short before downloading |
 | 📱 **Platform Presets** | YouTube Shorts, TikTok, Instagram Reels, X, Threads (safe zones included) |
-| 🎯 **Hook Generator** | Local AI-generated viral opener text for each clip |
-| 💾 **File System Streaming** | Stream renders directly to disk for large files (no RAM limits) |
-| 🔒 **100% Private** | Zero server uploads. WebCodecs + OffscreenCanvas + Web Audio — all on device |
-| ⚡ **60 FPS Render** | Hardware-accelerated H.264 via GPU WebCodecs encoder |
+| 🎯 **Hook Generator** | AI-generated viral opener text for each clip |
+| ⚡ **Hardware Acceleration** | Auto-detects NVENC / QSV / AMF — falls back to libx264 on CPU |
+| 🔄 **Real-Time Progress** | SSE stream pushes live FFmpeg progress to the browser |
+| ☁️ **Cloud Storage** | Outputs stored on Cloudflare R2 (free egress) or any S3-compatible store |
+
+---
+
+## 🏗️ Architecture
+
+```
+Browser (Next.js on Vercel)
+   │
+   ├─ POST /api/upload  ──────────────────▶ Media Worker (Docker)
+   │                                              │
+   ├─ GET  /api/jobs/:id/events (SSE) ◀──────── FFmpeg processing
+   │                                              │
+   └─ GET  /api/downloads/:file ◀─────────────── Output clips
+                                                  │
+                                         PostgreSQL + Redis + R2
+```
+
+The **media worker** is a Node.js HTTP server that wraps FFmpeg. It auto-detects GPU encoders (NVENC, QSV, AMF) and falls back to `libx264` on CPU — which is reliable for all supported resolutions.
 
 ---
 
@@ -47,31 +65,43 @@
 
 - **Framework**: Next.js 15 (App Router) + TypeScript
 - **Styling**: Tailwind CSS v3 + custom design system
-- **Video Engine**: WebCodecs API (`VideoEncoder`, `AudioEncoder`, `VideoFrame`)
-- **Audio**: Web Audio API (`AudioContext`, `decodeAudioData`) → AAC via `AudioEncoder`
-- **Muxing**: `mp4-muxer` v5 (H.264 + AAC in MP4 container, in-browser)
-- **AI Hooks**: Client-side NLP keyword extraction + hook generation
-- **Favicon**: Custom SVG + PNG multi-resolution icon suite (16, 32, 180, 192, 512px)
-- **Monorepo**: npm workspaces (`apps/web`, `packages/*`)
+- **Video Processing**: FFmpeg (cloud worker, Docker) — full codec support incl. libass subtitles
+- **Job Queue**: BullMQ + Redis (Upstash free tier supported)
+- **Database**: PostgreSQL (Supabase free tier supported)
+- **Storage**: Cloudflare R2 / AWS S3 / local disk
+- **AI Hooks**: Gemini API (optional) + fallback NLP keyword extraction
+- **Monorepo**: npm workspaces (`apps/web`, `packages/*`, `services/*`)
 
 ---
 
 ## 🗂️ Project Structure
 
 ```
-youtube-long-to-shots/
+pulsecut-ai/
 ├── apps/
-│   └── web/                  # Next.js 15 frontend (the main app)
+│   └── web/                  # Next.js 15 frontend
 │       ├── src/
-│       │   ├── app/          # App Router pages
+│       │   ├── app/          # App Router pages + API routes
+│       │   │   └── api/      # Proxy routes → media worker
 │       │   ├── components/   # Navbar, Footer, ProcessingScreen
-│       │   ├── lib/          # videoEngine, localAI, subtitles, deviceDetector
+│       │   ├── lib/          # ssrfGuard, workerClient, subtitles
 │       │   └── config/       # APP_CONFIG (brand, URLs, navigation)
 │       └── public/           # Favicons, manifest.webmanifest
 ├── packages/
 │   ├── shared/               # calculateClips, formatDuration utilities
 │   ├── platform-presets/     # Platform safe zones + aspect ratios
 │   └── video-config/         # Bitrate & codec configuration
+├── services/
+│   └── media-worker/         # Docker FFmpeg worker (Node.js HTTP)
+│       ├── src/
+│       │   ├── server.ts     # HTTP server entry point
+│       │   ├── worker.ts     # Job state + HTTP handlers
+│       │   ├── pipeline.ts   # FFmpeg encoding pipeline
+│       │   ├── ffmpeg.ts     # Hardware detection
+│       │   └── subtitles.ts  # ASS subtitle generation
+│       └── Dockerfile.worker # Production Docker image
+├── .env.example              # All environment variables documented
+├── DEPLOYMENT.md             # Full cloud deployment guide
 └── scripts/                  # generate_favicons.js
 ```
 
@@ -87,47 +117,49 @@ cd pulsecut-local-ai
 # 2. Install dependencies
 npm install
 
-# 3. Start dev server
-cd apps/web && npm run dev
+# 3. Copy and configure environment
+cp .env.example .env
+# Edit .env — at minimum set MEDIA_WORKER_URL=http://localhost:8080
 
-# Or from root:
+# 4. Start the media worker (requires Docker and FFmpeg installed locally)
+docker build -f services/media-worker/Dockerfile.worker -t pulsecut-worker .
+docker run -p 8080:8080 --env-file .env pulsecut-worker
+
+# 5. Start the Next.js dev server
 npm run dev
-
 # App is running at http://localhost:3000
 ```
 
-> No `.env` file required for local development — the app is 100% client-side.
+> [!NOTE]
+> For local development without Docker, install FFmpeg locally and run the worker directly:
+> ```bash
+> cd services/media-worker && npm run build && node dist/server.js
+> ```
 
 ---
 
-## 🌐 Deploy on Netlify (Recommended)
+## 🌐 Deployment
 
-Thanks to `netlify.toml`, deploying on Netlify is zero-config:
+PulseCut AI uses a two-service architecture. See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the full step-by-step guide, including:
 
-1. Import your repository into [Netlify](https://app.netlify.com/).
-2. Netlify will auto-detect settings from [netlify.toml](file:///c:/Users/ACCER/Desktop/github%20respos/palse-ai/netlify.toml):
-   - **Base directory**: *(leave empty / root)*
-   - **Build command**: `npm run build`
-   - **Publish directory**: `apps/web/out`
-3. Click **Deploy Site**.
+- Free-tier infrastructure recommendations (Vercel + Railway + Upstash + Supabase + Cloudflare R2)
+- Docker deployment to Railway, Render, Fly.io, or self-hosted VPS
+- Environment variable configuration
+- Production readiness checklist
+- Troubleshooting guide
 
----
-
-## 🌐 Deploy on Vercel
+**Quick deploy to Vercel (frontend only):**
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Code-With-Bitwizards-20/pulsecut-local-ai)
 
-**Manual Vercel Deployment Settings:**
-- **Root Directory**: `apps/web`
-- **Framework Preset**: `Next.js`
-- **Build Command**: `npm run build`
-- **Output Directory**: `.next` *(auto-detected)*
-- **Install Command**: `cd ../.. && npm install`
+> [!IMPORTANT]
+> The Vercel deploy alone is not enough — you must also deploy the **media worker** Docker container. Without it, video processing will fail. See [DEPLOYMENT.md](DEPLOYMENT.md) → Step 7.
 
-**Environment Variables on Vercel:**
+**Key environment variables for Vercel:**
 ```
-NEXT_PUBLIC_APP_URL = https://pulsecut-ai.vercel.app
-NODE_ENV = production
+MEDIA_WORKER_URL=https://your-worker.up.railway.app
+WORKER_SECRET=your-32-char-random-secret
+NEXT_PUBLIC_APP_URL=https://your-app.vercel.app
 ```
 
 ---

@@ -1,3 +1,7 @@
+/**
+ * worker.ts — Re-exports from pipeline and peripheral modules.
+ * The HTTP server entry point is server.ts (node dist/server.js).
+ */
 import { runMediaPipeline, type PipelineOptions, type PipelineResult } from './pipeline.js';
 
 export async function processVideoJob(options: PipelineOptions): Promise<PipelineResult> {

@@ -45,6 +45,7 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://shorts_user:shorts_secure_password@postgres:5432/shorts_db
       REDIS_URL: redis://redis:6379
+      MEDIA_WORKER_URL: http://media-worker:8080
       STORAGE_DRIVER: local
       UPLOAD_DIR: /app/uploads
     volumes:
@@ -61,7 +62,10 @@ services:
       dockerfile: Dockerfile.worker
     container_name: shorts_media_worker
     restart: always
+    ports:
+      - '8080:8080'
     environment:
+      PORT: 8080
       DATABASE_URL: postgresql://shorts_user:shorts_secure_password@postgres:5432/shorts_db
       REDIS_URL: redis://redis:6379
       UPLOAD_DIR: /app/uploads

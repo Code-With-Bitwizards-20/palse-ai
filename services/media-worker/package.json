@@ -5,7 +5,9 @@
   "types": "./dist/worker.d.ts",
   "scripts": {
     "build": "tsc",
-    "worker": "node dist/worker.js",
+    "worker": "node dist/server.js",
+    "start": "node dist/server.js",
+    "server": "node dist/server.js",
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
