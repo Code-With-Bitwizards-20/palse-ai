@@ -221,7 +221,7 @@ export function DualSourceDropzone({ onVideoSelected, isProcessing }: DualSource
               Drop your video here or <span className="text-cyan-400 underline underline-offset-4">browse files</span>
             </h3>
             <p className="text-xs text-slate-400 max-w-md">
-              Supports MP4, MOV, WebM, and MKV. Runs 100% inside your browser using WebCodecs GPU acceleration. Zero cloud uploads.
+              Supports MP4, MOV, WebM, and MKV. Processed securely via cloud media workers. Files deleted after 24h.
             </p>
 
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-[11px] text-slate-400">

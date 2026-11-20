@@ -56,7 +56,7 @@ export async function probeDirectMediaCors(url: string, signal?: AbortSignal): P
 
 /**
  * Downloads a direct media URL progressively in the browser, tracking byte progress,
- * and converts it into a standard File object compatible with Mediabunny and WebCodecs.
+ * and converts it into a standard File object for cloud ingestion.
  */
 export async function downloadDirectMedia(
   url: string,

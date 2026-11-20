@@ -219,4 +219,48 @@ describe('PulseCut AI — Cloud-Powered Architecture Verification', () => {
     assert.ok(content.includes('YOUTUBE_DIRECT_STREAM_RESTRICTED'), 'Must define YOUTUBE_DIRECT_STREAM_RESTRICTED code');
     assert.ok(content.includes('directUploadRecommended'), 'Must recommend direct upload for restricted sources');
   });
+
+  it('TEST 11: Zero AudioContext, decodeAudioData, or AudioBuffer in apps/web/src/app/studio/page.tsx', () => {
+    const studioPath = path.join(WEB_SRC, 'app/studio/page.tsx');
+    assert.ok(fs.existsSync(studioPath), 'studio/page.tsx must exist');
+    const content = fs.readFileSync(studioPath, 'utf-8');
+
+    const forbiddenAudioApis = [
+      'new AudioContext',
+      'new (window.AudioContext',
+      'decodeAudioData',
+      'AudioBuffer',
+      'detectCandidateHighlights(',
+      'generateGamingHighlights(',
+    ];
+
+    for (const api of forbiddenAudioApis) {
+      assert.ok(!content.includes(api), `studio/page.tsx must not contain client audio processing: "${api}"`);
+    }
+  });
+
+  it('TEST 12: YouTube Timestamp Studio component is implemented for official embed preview', () => {
+    const componentPath = path.join(WEB_SRC, 'components/YouTubeTimestampStudio.tsx');
+    assert.ok(fs.existsSync(componentPath), 'YouTubeTimestampStudio.tsx must exist');
+    const content = fs.readFileSync(componentPath, 'utf-8');
+    assert.ok(content.includes('youtube-nocookie.com/embed'), 'Must use official privacy-enhanced YouTube embed');
+    assert.ok(content.includes('getChaptersText'), 'Must support chapters text export');
+    assert.ok(content.includes('downloadJson'), 'Must support JSON EDL export');
+    assert.ok(content.includes('downloadCsv'), 'Must support CSV export');
+  });
+
+  it('TEST 13: Media worker audioAnalyzer implements real FFmpeg silencedetect', () => {
+    const analyzerPath = path.join(ROOT, 'services/media-worker/src/audioAnalyzer.ts');
+    assert.ok(fs.existsSync(analyzerPath), 'audioAnalyzer.ts must exist');
+    const content = fs.readFileSync(analyzerPath, 'utf-8');
+    assert.ok(content.includes('silencedetect=noise=-28dB:d=0.4'), 'Must configure silencedetect filter');
+    assert.ok(content.includes('readInt16LE'), 'Must read 16-bit PCM WAV samples');
+  });
+
+  it('TEST 14: PostgreSQL schema file exists for cloud database deployment', () => {
+    const pgSchemaPath = path.join(ROOT, 'prisma/schema.postgresql.prisma');
+    assert.ok(fs.existsSync(pgSchemaPath), 'prisma/schema.postgresql.prisma must exist');
+    const content = fs.readFileSync(pgSchemaPath, 'utf-8');
+    assert.ok(content.includes('provider = "postgresql"'), 'Must declare provider = postgresql');
+  });
 });

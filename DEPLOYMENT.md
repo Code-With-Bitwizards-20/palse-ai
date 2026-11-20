@@ -83,8 +83,8 @@
 ### Step 1 — Fork and Clone
 
 ```bash
-git clone https://github.com/Code-With-Bitwizards-20/pulsecut-local-ai.git
-cd pulsecut-local-ai
+git clone https://github.com/Code-With-Bitwizards-20/palse-ai.git
+cd palse-ai
 npm install
 ```
 
@@ -97,6 +97,10 @@ npm install
    postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres
    ```
 4. Save this as `DATABASE_URL` in your environment
+5. Push the database schema directly to PostgreSQL using the provided cloud schema file:
+   ```bash
+   npx prisma db push --schema=prisma/schema.postgresql.prisma
+   ```
 
 ### Step 3 — Set Up Upstash Redis
 

@@ -57,11 +57,9 @@ import {
 } from '@/lib/subtitles';
 import { APP_CONFIG } from '@/config/app';
 import { DualSourceDropzone } from '@/features/ingestion/components/DualSourceDropzone';
-import { detectCandidateHighlights, CandidateClip } from '@/lib/highlightDetector';
-import {
-  generateGamingHighlights,
-  GamingProfile,
-} from '@/lib/gamingClipper';
+import type { GamingProfile } from '@/lib/gamingClipper';
+import type { CandidateClip } from '@/lib/highlightDetector';
+import { YouTubeTimestampStudio } from '@/components/YouTubeTimestampStudio';
 import { FindMomentsModal } from '@/components/FindMomentsModal';
 import { ClipEditorModal } from '@/components/ClipEditorModal';
 import { clientProjectStore, ClientProject } from '@/lib/indexedDBStore';
@@ -179,9 +177,21 @@ export default function StudioPage() {
   const [shorts, setShorts] = useState<ShortItem[]>([]);
   const [activeShortIndex, setActiveShortIndex] = useState<number>(0);
 
-  // ── Audio buffer for peak detection ──
-  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
-  const [audioPeakTimes, setAudioPeakTimes] = useState<number[]>([]);
+  // ── Source Notice & YouTube Preview State (No Client Audio Processing) ──
+  const [sourceNotice, setSourceNotice] = useState<{
+    type: 'youtube' | 'twitch' | 'vimeo' | 'unsupported' | 'error';
+    title: string;
+    message: string;
+    guidance?: string;
+    code?: string;
+    videoId?: string;
+    videoTitle?: string;
+    author?: string;
+    thumbnailUrl?: string;
+    url?: string;
+  } | null>(null);
+  const [youtubePreviewId, setYoutubePreviewId] = useState<string | null>(null);
+  const [youtubeMetadata, setYoutubeMetadata] = useState<{ title?: string; author?: string; url?: string } | null>(null);
 
   // ── Modals ──
   const [isFindMomentsOpen, setIsFindMomentsOpen] = useState(false);
@@ -207,105 +217,54 @@ export default function StudioPage() {
 
   const currentPlatformPreset = PLATFORM_PRESETS[selectedPlatform] || PLATFORM_PRESETS.universal;
 
-  // ─── Clip Plan Generation (heuristic preview) ──────────────────────────────
+  // ─── Clip Plan Generation (heuristic preview - purely metadata, NO client audio decoding) ───
 
   useEffect(() => {
     if (videoDuration <= 0) return;
     try {
       let items: ShortItem[] = [];
 
-      if (clippingMode === 'gaming-clipping') {
-        const candidates = generateGamingHighlights({
-          videoDuration,
-          profile: gamingProfile,
-          targetDuration: clipDuration,
-          clipCount: clipCountTarget,
-          audioBuffer: audioBuffer || undefined,
-        });
-        items = candidates.map((c, i) => ({
-          id: `gaming-${i + 1}`,
-          index: i + 1,
-          startTime: c.startTime,
-          endTime: c.endTime,
-          duration: c.duration,
-          filename: generateLocalShortFilename(c.title, i + 1, c.duration, resolutionTier, 60),
-          topic: c.title,
-          hook: {
-            id: `hook-g-${i}`,
-            category: 'Surprise',
-            text: c.suggestedHookText,
-            suggestedDurationSeconds: 3.0,
-          },
+      // Generate baseline clip boundaries using mathematical distribution for the EDL plan
+      const result = calculateClips(videoDuration, clipDuration, remainderStrategy);
+      items = result.clips.map((clip) => {
+        let topic = `Segment #${clip.index}`;
+        let pacing = 'Cloud-rendered pacing';
+        if (clippingMode === 'gaming-clipping') {
+          topic = `${gamingProfile} Highlight #${clip.index}`;
+          pacing = `${gamingProfile} action burst detected on cloud worker.`;
+        } else if (clippingMode === 'ai-clipping') {
+          topic = `AI Key Highlight #${clip.index}`;
+          pacing = 'Acoustic energy & speech pause alignment by cloud worker.';
+        }
+
+        const dummyTranscript = `Clip ${clip.index}: Highlights from ${clip.startTime}s to ${clip.endTime}s.`;
+        const hooks = generateHooks(dummyTranscript, topic);
+        const primaryHook = hooks[0] || {
+          id: `hook-${clip.index}`,
+          category: 'Curiosity',
+          text: topic,
+          suggestedDurationSeconds: 3.0,
+        };
+        const engagement = evaluateEngagementPotential(dummyTranscript, clip.duration, true);
+        const filename = generateLocalShortFilename(topic, clip.index, clip.duration, resolutionTier, 60);
+
+        return {
+          id: `short-${clip.index}`,
+          index: clip.index,
+          startTime: clip.startTime,
+          endTime: clip.endTime,
+          duration: clip.duration,
+          filename,
+          topic,
+          hook: primaryHook,
           engagement: {
-            score: c.score,
-            rating: c.score > 85 ? 'Exceptional' : 'Strong',
-            firstSecondsHook: c.suggestedHookText,
-            deadAirRatio: 'Low (< 4%)',
-            captionReadability: 'High',
-            speechClarity: 'Clear',
-            pacingNote: `${gamingProfile} action burst detected.`,
+            ...engagement,
+            pacingNote: pacing,
           },
           status: 'idle',
-          score: c.score,
-          explanation: c.explanation,
-        }));
-      } else if (clippingMode === 'ai-clipping') {
-        const candidates = detectCandidateHighlights({
-          videoDuration,
-          targetDuration: clipDuration,
-          clipCount: clipCountTarget,
-          audioBuffer: audioBuffer || undefined,
-        });
-        items = candidates.map((c, i) => ({
-          id: `ai-${i + 1}`,
-          index: i + 1,
-          startTime: c.startTime,
-          endTime: c.endTime,
-          duration: c.duration,
-          filename: generateLocalShortFilename(c.title, i + 1, c.duration, resolutionTier, 60),
-          topic: c.title,
-          hook: {
-            id: `hook-${i}`,
-            category: 'Curiosity',
-            text: c.suggestedHookText,
-            suggestedDurationSeconds: 3.0,
-          },
-          engagement: {
-            score: c.score,
-            rating: c.score > 85 ? 'Exceptional' : 'Strong',
-            firstSecondsHook: c.suggestedHookText,
-            deadAirRatio: 'Optimal (< 8%)',
-            captionReadability: 'High',
-            speechClarity: 'Clear',
-            pacingNote: 'Sentence pause boundary alignment applied.',
-          },
-          status: 'idle',
-          score: c.score,
-          explanation: c.explanation,
-        }));
-      } else {
-        const result = calculateClips(videoDuration, clipDuration, remainderStrategy);
-        items = result.clips.map((clip) => {
-          const dummyTranscript = `Clip ${clip.index}: Key takeaways from ${clip.startTime}s to ${clip.endTime}s.`;
-          const hooks = generateHooks(dummyTranscript, `Part ${clip.index}`);
-          const primaryHook = hooks[0];
-          const engagement = evaluateEngagementPotential(dummyTranscript, clip.duration, true);
-          const filename = generateLocalShortFilename(dummyTranscript, clip.index, clip.duration, resolutionTier, 60);
-          return {
-            id: `short-${clip.index}`,
-            index: clip.index,
-            startTime: clip.startTime,
-            endTime: clip.endTime,
-            duration: clip.duration,
-            filename,
-            topic: `Segment #${clip.index}`,
-            hook: primaryHook,
-            engagement,
-            status: 'idle',
-            score: engagement.score,
-          };
-        });
-      }
+          score: engagement.score,
+        };
+      });
 
       setShorts(items);
       if (items.length > 0 && activeShortIndex >= items.length) setActiveShortIndex(0);
@@ -344,17 +303,18 @@ export default function StudioPage() {
     } catch (err) {
       console.error('Error generating clip plan:', err);
     }
-  }, [videoDuration, clipDuration, clipCountTarget, clippingMode, gamingProfile, remainderStrategy, resolutionTier, audioBuffer]);
+  }, [videoDuration, clipDuration, clipCountTarget, clippingMode, gamingProfile, remainderStrategy, resolutionTier]);
 
   // ─── Upload Handler ────────────────────────────────────────────────────────
 
   const handleFileSelected = useCallback(async (file: File) => {
     setVideoFile(file);
     setWorkerError(null);
+    setSourceNotice(null);
     setIsUploading(true);
     setUploadProgress(0);
 
-    // Probe duration locally (best effort)
+    // Probe duration locally (HTML5 video element only — zero client audio decoding)
     const tempUrl = URL.createObjectURL(file);
     const vid = document.createElement('video');
     vid.preload = 'metadata';
@@ -370,24 +330,6 @@ export default function StudioPage() {
       vid.onerror = () => { URL.revokeObjectURL(tempUrl); res(); };
       setTimeout(res, 3000);
     });
-
-    // Decode audio for peak detection
-    file.arrayBuffer().then((ab) => {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      return ctx.decodeAudioData(ab);
-    }).then((decoded) => {
-      setAudioBuffer(decoded);
-      const chData = decoded.getChannelData(0);
-      const peaks: number[] = [];
-      const win = Math.floor(decoded.sampleRate * 0.5);
-      for (let i = 0; i < chData.length; i += win) {
-        let sum = 0;
-        for (let j = 0; j < win; j += 4) { const v = chData[i + j] || 0; sum += v * v; }
-        const rms = Math.sqrt(sum / (win / 4));
-        if (rms > 0.6) peaks.push(Math.round((i / decoded.sampleRate) * 10) / 10);
-      }
-      setAudioPeakTimes(peaks);
-    }).catch(() => {});
 
     // Upload to cloud worker via /api/upload proxy
     try {
@@ -424,21 +366,98 @@ export default function StudioPage() {
   // ─── URL Import Handler ────────────────────────────────────────────────────
 
   const handleUrlImport = useCallback(async () => {
-    if (!urlImportValue.trim()) return;
+    const trimmed = urlImportValue.trim();
+    if (!trimmed) return;
     setWorkerError(null);
+    setSourceNotice(null);
     setIsUploading(true);
+
     try {
       const res = await fetch('/api/upload/url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: urlImportValue.trim() }),
+        body: JSON.stringify({ url: trimmed }),
       });
-      if (!res.ok) throw new Error(`URL import failed: ${res.status} ${res.statusText}`);
-      const data: UploadResult = await res.json();
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        // Specific handling for YouTube source terms restriction (HTTP 422)
+        if (res.status === 422 && (data.code === 'YOUTUBE_DIRECT_STREAM_RESTRICTED' || data.provider === 'youtube')) {
+          setSourceNotice({
+            type: 'youtube',
+            title: 'YouTube link import is not available',
+            message:
+              'PulseCut AI can preview supported YouTube links and save timestamps, but it cannot automatically extract and download arbitrary YouTube video streams. Upload your authorized original video file to create downloadable clips.',
+            guidance:
+              data.guidance ||
+              'Use the embedded YouTube previewer to mark and save timestamp clips, or download the original file via YouTube Studio and upload it directly.',
+            code: data.code,
+            videoId: data.videoId,
+            videoTitle: data.title,
+            author: data.author,
+            thumbnailUrl: data.thumbnailUrl,
+            url: trimmed,
+          });
+          return;
+        }
+
+        // Generic 422 for other platforms (Twitch, Vimeo, etc.)
+        if (res.status === 422) {
+          setSourceNotice({
+            type: data.provider || 'unsupported',
+            title: `${data.provider ? data.provider.toUpperCase() : 'Source'} stream restricted`,
+            message: data.message || 'Direct video downloading is restricted for this source.',
+            guidance: data.guidance,
+            code: data.code,
+            url: trimmed,
+          });
+          return;
+        }
+
+        // 400 Bad Request
+        if (res.status === 400) {
+          setSourceNotice({
+            type: 'error',
+            title: 'Invalid video URL',
+            message: data.error || data.message || 'Please provide a valid direct video URL or supported platform link.',
+            url: trimmed,
+          });
+          return;
+        }
+
+        // 415 Unsupported Media
+        if (res.status === 415) {
+          setSourceNotice({
+            type: 'unsupported',
+            title: 'Unsupported video format',
+            message: data.message || 'Only direct MP4, WebM, and MOV video URLs can be imported.',
+            url: trimmed,
+          });
+          return;
+        }
+
+        // 503 Worker Unavailable
+        if (res.status === 503) {
+          setWorkerError('Cloud processing is temporarily unavailable. Please verify the media worker is reachable.');
+          return;
+        }
+
+        // Fallback for unexpected errors
+        setSourceNotice({
+          type: 'error',
+          title: 'Source import error',
+          message: data.message || data.error || `Import failed with status ${res.status}.`,
+          url: trimmed,
+        });
+        return;
+      }
+
+      // Successful import of direct media URL
       setUploadResult(data);
       setPhase('options');
     } catch (err: any) {
-      setWorkerError(err?.message || 'URL import failed. The cloud worker may be unavailable.');
+      setWorkerError(err?.message || 'Network error connecting to API. The service may be temporarily unreachable.');
     } finally {
       setIsUploading(false);
     }
@@ -613,13 +632,71 @@ export default function StudioPage() {
         </span>
       </div>
 
-      {/* Worker Unavailable Error Banner */}
+      {/* Source Notice Banner (e.g. YouTube Terms & Guidance) */}
+      {sourceNotice && (
+        <div className="bg-amber-950/80 border-b border-amber-500/40 px-4 py-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="h-9 w-9 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0 mt-0.5">
+              {sourceNotice.type === 'youtube' ? <Tv className="h-5 w-5 text-red-400" /> : <AlertTriangle className="h-5 w-5" />}
+            </div>
+            <div>
+              <p className="text-sm font-bold text-amber-200">{sourceNotice.title}</p>
+              <p className="text-xs text-amber-300/90 mt-0.5 max-w-3xl leading-relaxed">
+                {sourceNotice.message}
+              </p>
+              {sourceNotice.guidance && (
+                <p className="text-[11px] text-slate-300 mt-1 italic">
+                  💡 {sourceNotice.guidance}
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {sourceNotice.type === 'youtube' && sourceNotice.videoId && (
+              <button
+                onClick={() => {
+                  setYoutubePreviewId(sourceNotice.videoId!);
+                  setYoutubeMetadata({
+                    title: sourceNotice.videoTitle,
+                    author: sourceNotice.author,
+                    url: sourceNotice.url,
+                  });
+                  setSourceTab('url');
+                  setSourceNotice(null);
+                }}
+                className="flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white transition-all shadow-lg shadow-red-600/20"
+              >
+                <Tv className="h-3.5 w-3.5" />
+                <span>Preview &amp; Save Timestamps</span>
+              </button>
+            )}
+            <button
+              onClick={() => {
+                setSourceTab('upload');
+                setSourceNotice(null);
+              }}
+              className="flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 transition-all"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>Upload Original File</span>
+            </button>
+            <button
+              onClick={() => setSourceNotice(null)}
+              className="text-xs text-slate-400 hover:text-white px-2 py-1"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Cloud Worker Unavailable Error Banner */}
       {workerError && (
         <div className="bg-red-950/70 border-b border-red-500/40 px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-start gap-2">
             <ServerCrash className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-bold text-red-200">Cloud worker is currently unavailable.</p>
+              <p className="text-sm font-bold text-red-200">Cloud processing is temporarily unavailable.</p>
               <p className="text-xs text-red-300 mt-0.5">
                 {workerError} Your video has NOT been processed on your device.
               </p>
@@ -789,6 +866,21 @@ export default function StudioPage() {
                   />
                 )}
               </div>
+            ) : youtubePreviewId ? (
+              <YouTubeTimestampStudio
+                videoId={youtubePreviewId}
+                initialTitle={youtubeMetadata?.title}
+                author={youtubeMetadata?.author}
+                url={youtubeMetadata?.url || `https://www.youtube.com/watch?v=${youtubePreviewId}`}
+                onUploadOriginal={() => {
+                  setYoutubePreviewId(null);
+                  setSourceTab('upload');
+                }}
+                onChangeUrl={() => {
+                  setYoutubePreviewId(null);
+                  setUrlImportValue('');
+                }}
+              />
             ) : (
               /* URL Import */
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-4">
@@ -1388,7 +1480,7 @@ export default function StudioPage() {
         onClose={() => setIsFindMomentsOpen(false)}
         videoDuration={videoDuration}
         subtitles={subtitles}
-        audioPeakTimes={audioPeakTimes}
+        audioPeakTimes={[]}
         onSelectMoment={handleMomentFound}
       />
 

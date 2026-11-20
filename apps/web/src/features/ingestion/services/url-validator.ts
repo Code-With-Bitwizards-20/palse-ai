@@ -97,7 +97,7 @@ export function validateVideoUrl(input: string): UrlValidationResult {
       normalizedUrl: parsed.href,
       platform: 'tiktok',
       isDirectMedia: false,
-      helpMessage: 'TikTok web links cannot be loaded by in-browser WebCodecs without server proxies.',
+      helpMessage: 'TikTok web links cannot be loaded without authorized API access.',
       officialExportInstructions: [
         'Open TikTok on your desktop browser or mobile app.',
         'Export or download your original recording via the TikTok Creator Center.',
