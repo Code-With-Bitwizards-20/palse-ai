@@ -18,17 +18,6 @@ const nextConfig = {
       'zod',
     ],
   },
-  // Aggressive bundle splitting — keep each async chunk small
-  webpack(config, { isServer }) {
-    if (!isServer) {
-      config.optimization.splitChunks = {
-        ...config.optimization.splitChunks,
-        maxInitialRequests: 25,
-        minSize: 20_000,
-      };
-    }
-    return config;
-  },
 };
 
 export default nextConfig;
