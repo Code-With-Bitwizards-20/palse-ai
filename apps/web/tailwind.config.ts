@@ -40,8 +40,7 @@ const config: Config = {
         },
       },
       fontFamily: {
-        // Use the CSS var injected by next/font/google — avoids any FOUT
-        sans: ['var(--font-inter)', 'system-ui', '-apple-system', 'sans-serif'],
+        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', "'Segoe UI'", 'Roboto', 'sans-serif'],
       },
       animation: {
         'pulse-subtle': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',

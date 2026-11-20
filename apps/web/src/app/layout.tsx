@@ -1,21 +1,8 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
 import './globals.css';
 import { Navbar } from '@/components/Navbar';
 import { Footer } from '@/components/Footer';
 import { APP_CONFIG } from '@/config/app';
-
-// next/font/google loads Inter with zero render-blocking:
-// the font CSS is inlined at build time and the font files are
-// self-hosted by Vercel — no external round-trip on first paint.
-const inter = Inter({
-  subsets: ['latin'],
-  display: 'swap',
-  variable: '--font-inter',
-  preload: true,
-  // Only load the weights actually used in the UI
-  weight: ['400', '500', '600', '700', '800', '900'],
-});
 
 export const metadata: Metadata = {
   metadataBase: new URL(APP_CONFIG.url || 'https://palse-ai-by-code-with-bitwizards.vercel.app'),
@@ -101,7 +88,7 @@ export default function RootLayout({
   };
 
   return (
-    <html lang="en" className={`dark ${inter.variable}`}>
+    <html lang="en" className="dark">
       <head>
         {/* Structured data */}
         <script

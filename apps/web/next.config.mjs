@@ -9,15 +9,6 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  experimental: {
-    // Tree-shake icon and utility libraries on a per-symbol basis
-    optimizePackageImports: [
-      'lucide-react',
-      'clsx',
-      'tailwind-merge',
-      'zod',
-    ],
-  },
 };
 
 export default nextConfig;

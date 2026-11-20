@@ -19,8 +19,8 @@ body {
   padding: 0;
   background-color: var(--background);
   color: var(--foreground);
-  /* Use the CSS variable injected by next/font/google — zero network round-trip */
-  font-family: var(--font-inter), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Clean system font stack — zero external network round-trip, zero build-time crash */
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif;
   overflow-x: hidden;
   min-width: 315px; /* WCAG 315px responsive requirement */
   -webkit-font-smoothing: antialiased;
