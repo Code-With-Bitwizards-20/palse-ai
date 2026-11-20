@@ -170,7 +170,7 @@ export function Navbar() {
         <div className="flex flex-wrap gap-2 px-5 py-3 border-b border-slate-800/60">
           <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400 border border-emerald-500/20">
             <ShieldCheck className="h-3 w-3" />
-            100% Local Processing
+            Cloud-Powered AI
           </span>
           <span className="inline-flex items-center rounded-full bg-blue-500/10 px-3 py-1 text-xs font-semibold text-blue-400 border border-blue-500/20">
             No Account Required
@@ -215,7 +215,7 @@ export function Navbar() {
             <span>Launch Studio — It&apos;s Free</span>
           </Link>
           <p className="text-center text-[11px] text-slate-400">
-            No signup · No upload · 100% private
+            No signup · Files deleted after 24h · 100% private
           </p>
         </div>
       </aside>

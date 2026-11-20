@@ -176,18 +176,18 @@ export function Footer() {
               <span className="text-base font-extrabold text-white tracking-tight">
                 Pulse<span className="text-indigo-400">Cut</span>{' '}
                 <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 align-middle">
-                  Local AI
+                  Cloud AI
                 </span>
               </span>
             </Link>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Turn one long video into viral, scroll-stopping Shorts in seconds. 100%
-              in-browser AI processing — zero cloud uploads, zero subscriptions, complete
+              Turn one long video into viral, scroll-stopping Shorts in seconds. Cloud AI
+              processing — secure remote workers, zero subscriptions, complete
               data privacy.
             </p>
             <div className="flex items-center gap-1.5 text-xs text-emerald-400">
               <ShieldCheck className="h-4 w-4 shrink-0" />
-              <span>Private by design — 100% on-device AI</span>
+              <span>Private by design — cloud AI, files deleted after 24h</span>
             </div>
 
             {/* Quick Action Buttons */}
@@ -375,7 +375,7 @@ export function Footer() {
         {/* Bottom Bar: Copyright & Attribution */}
         <div className="border-t border-slate-800/80 pt-6 flex flex-col items-center gap-4 text-center sm:flex-row sm:justify-between sm:text-left">
           <p className="text-[11px] text-slate-400">
-            © {currentYear} PulseCut Local AI. All rights reserved. 100% Private, Client-Side Studio.
+            © {currentYear} PulseCut AI. All rights reserved. Cloud AI Video Studio — Files deleted after 24h.
           </p>
 
           {/* Designed & Developed attribution with clickable portfolio link */}

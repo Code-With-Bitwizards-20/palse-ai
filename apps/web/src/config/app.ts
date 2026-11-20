@@ -8,13 +8,13 @@ export const APP_CONFIG = {
   shortName: 'PulseCut AI',
   tagline: 'Intelligent AI Clipping Studio for Creators & Gamers',
   description:
-    '100% in-browser, privacy-first AI video clipping studio. Converts long videos into 60 FPS platform-ready Shorts with zero server uploads and zero API keys.',
+    'Cloud-powered AI video clipping studio. Upload your video, let remote AI workers analyze and clip, then download platform-ready Shorts.',
   url: 'https://palse-ai-by-code-with-bitwizards.vercel.app',
   ogImage: '/brand/og-image.png',
   version: '2.5.0',
   author: 'Code With Bitwizards',
   developerUrl: 'https://code-with-bitwizards.vercel.app/',
-  privacyGuarantee: 'Private by design — your videos are processed locally in your browser and are not uploaded to our servers.',
+  privacyGuarantee: 'Private by design — your videos are encrypted in transit, processed on our secure cloud workers, and deleted after 24 hours.',
   navigation: {
     main: [
       { label: 'Studio Editor', href: '/studio' },
