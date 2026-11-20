@@ -125,6 +125,7 @@ export function calculateReframeCrop(
         panX = 0.5 + Math.sin(timeProgress * 0.5) * 0.08; break;
       case 'AI Smart':
         panX = 0.45 + Math.sin(timeProgress * 0.4) * 0.1; break;
+      case 'Gameplay':   panX = 0.55; break;
       case 'Manual':     panX = manualPanOffset; break;
       case 'Center':
       default:           panX = 0.5; break;

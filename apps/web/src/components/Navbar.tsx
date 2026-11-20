@@ -75,9 +75,9 @@ export function Navbar() {
               <Scissors className="h-5 w-5 text-white" />
             </div>
             <span className="text-base font-extrabold tracking-tight text-white sm:text-lg whitespace-nowrap">
-              Pulse<span className="text-indigo-400">Cut</span>{' '}
-              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 align-middle">
-                Local AI
+              Pulse<span className="text-cyan-400">Cut</span>{' '}
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 align-middle">
+                AI Studio
               </span>
             </span>
           </Link>
