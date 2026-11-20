@@ -185,9 +185,10 @@ async function handleCreateJob(req: http.IncomingMessage, res: http.ServerRespon
     catch { sendError(res, 400, 'Invalid JSON body'); return; }
 
     const {
-      sourceFilePath,
+      sourceFilePath: rawSourcePath,
+      urlSource,
       projectId,
-      selectedDurationSeconds,
+      selectedDurationSeconds = 30,
       remainderStrategy,
       qualityTier,
       enable60Fps,
@@ -197,8 +198,10 @@ async function handleCreateJob(req: http.IncomingMessage, res: http.ServerRespon
       clippingMode,
     } = payload;
 
-    if (!sourceFilePath) { sendError(res, 400, 'sourceFilePath is required'); return; }
-    if (!selectedDurationSeconds) { sendError(res, 400, 'selectedDurationSeconds is required'); return; }
+    if (!rawSourcePath && !urlSource) {
+      sendError(res, 400, 'sourceFilePath or urlSource is required');
+      return;
+    }
 
     // Check capacity
     const running = [...jobs.values()].filter(j => j.status === 'RUNNING').length;
@@ -231,12 +234,51 @@ async function handleCreateJob(req: http.IncomingMessage, res: http.ServerRespon
       jobState.status = 'RUNNING';
       jobState.logs.push(`[${new Date().toISOString()}] Job started`);
 
+      let resolvedSourcePath = rawSourcePath;
+      try {
+        if (!resolvedSourcePath && urlSource) {
+          broadcastSSE(jobId, {
+            jobId,
+            projectId: resolvedProjectId,
+            stage: 'UPLOADING',
+            stageLabel: 'Downloading remote media from URL source...',
+            percent: 3,
+            timestamp: new Date().toISOString(),
+          } as JobProgressEvent);
+
+          const downloadDest = path.join(UPLOAD_DIR, 'uploads', jobId);
+          fs.mkdirSync(downloadDest, { recursive: true });
+          resolvedSourcePath = path.join(downloadDest, 'remote_source.mp4');
+
+          const remoteRes = await fetch(urlSource, { signal: AbortSignal.timeout(60_000) });
+          if (!remoteRes.ok) {
+            throw new Error(`Failed to download remote media: HTTP ${remoteRes.status}`);
+          }
+          const fileStream = fs.createWriteStream(resolvedSourcePath);
+          const nodeReadable = stream.Readable.fromWeb(remoteRes.body as any);
+          await stream.promises.pipeline(nodeReadable, fileStream);
+        }
+      } catch (dlErr: any) {
+        jobState.status = 'FAILED';
+        jobState.completedAt = new Date().toISOString();
+        jobState.logs.push(`[${new Date().toISOString()}] URL download failed: ${dlErr.message}`);
+        broadcastSSE(jobId, {
+          jobId,
+          projectId: resolvedProjectId,
+          stage: 'FAILED',
+          stageLabel: `URL download failed: ${dlErr.message}`,
+          percent: 0,
+          timestamp: new Date().toISOString(),
+        } as JobProgressEvent);
+        return;
+      }
+
       const pipelineOptions: PipelineOptions = {
         projectId: resolvedProjectId,
         jobId,
-        sourceFilePath,
+        sourceFilePath: resolvedSourcePath!,
         outputDirectory,
-        selectedDurationSeconds,
+        selectedDurationSeconds: Number(selectedDurationSeconds) || 30,
         remainderStrategy,
         qualityTier,
         enable60Fps,

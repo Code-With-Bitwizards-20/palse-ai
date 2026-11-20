@@ -25,6 +25,12 @@ data/*.db
 data/*.db-journal
 data/*.db-shm
 data/*.db-wal
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+prisma/*.db
+prisma/*.db-journal
 
 # Prisma generated files (re-generated at build time)
 prisma/generated/

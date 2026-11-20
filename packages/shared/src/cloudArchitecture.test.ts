@@ -93,10 +93,20 @@ describe('PulseCut AI — Cloud-Powered Architecture Verification', () => {
     const required = [
       'apps/web/src/app/api/health/route.ts',
       'apps/web/src/app/api/upload/route.ts',
+      'apps/web/src/app/api/upload/url/route.ts',
+      'apps/web/src/app/api/upload/init/route.ts',
+      'apps/web/src/app/api/upload/complete/route.ts',
       'apps/web/src/app/api/jobs/route.ts',
       'apps/web/src/app/api/jobs/[id]/route.ts',
       'apps/web/src/app/api/jobs/[id]/events/route.ts',
       'apps/web/src/app/api/jobs/[id]/cancel/route.ts',
+      'apps/web/src/app/api/projects/route.ts',
+      'apps/web/src/app/api/projects/[id]/route.ts',
+      'apps/web/src/app/api/clips/route.ts',
+      'apps/web/src/app/api/clips/[id]/route.ts',
+      'apps/web/src/app/api/clips/[id]/export/route.ts',
+      'apps/web/src/app/api/exports/[id]/route.ts',
+      'apps/web/src/app/api/worker/health/route.ts',
       'apps/web/src/app/api/downloads/[filename]/route.ts',
       'apps/web/src/app/api/url-import/route.ts',
     ];
@@ -179,5 +189,34 @@ describe('PulseCut AI — Cloud-Powered Architecture Verification', () => {
       fileExists('services/media-worker/dist/server.js'),
       'services/media-worker/dist/server.js must exist'
     );
+  });
+
+  it('TEST 9: Prisma schema contains all required entities', () => {
+    assert.ok(fileExists('prisma/schema.prisma'), 'prisma/schema.prisma must exist');
+    const schema = readText('prisma/schema.prisma');
+    const requiredModels = [
+      'model User',
+      'model Project',
+      'model SourceVideo',
+      'model ProcessingJob',
+      'model JobEvent',
+      'model Clip',
+      'model TranscriptWord',
+      'model Render',
+      'model PlatformMetadata',
+    ];
+    for (const model of requiredModels) {
+      assert.ok(schema.includes(model), `Prisma schema must declare: ${model}`);
+    }
+  });
+
+  it('TEST 10: Source adapters exist and YouTube adapter respects platform terms', () => {
+    const adapterPath = path.join(WEB_SRC, 'lib/sourceAdapters.ts');
+    assert.ok(fs.existsSync(adapterPath), 'sourceAdapters.ts must exist');
+    const content = fs.readFileSync(adapterPath, 'utf-8');
+    assert.ok(content.includes('YouTubeSourceAdapter'), 'YouTubeSourceAdapter must be defined');
+    assert.ok(content.includes('DirectMediaUrlAdapter'), 'DirectMediaUrlAdapter must be defined');
+    assert.ok(content.includes('YOUTUBE_DIRECT_STREAM_RESTRICTED'), 'Must define YOUTUBE_DIRECT_STREAM_RESTRICTED code');
+    assert.ok(content.includes('directUploadRecommended'), 'Must recommend direct upload for restricted sources');
   });
 });
